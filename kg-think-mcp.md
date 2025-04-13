@@ -9,6 +9,19 @@ This is the Python implementation of the MCP Think Tank using FastMCP V2.
 This new version of mcp-think-tank will be on https://github.com/flight505/mcp-think-tank-py
 Just for reference the old src is avalible here: src_from_mcp-think-tank in the root folder. 
 
+links that might be usefull:
+https://github.com/jlowin/fastmcp
+https://github.com/modelcontextprotocol/python-sdk
+https://modelcontextprotocol.io/tutorials/building-mcp-with-llms
+https://modelcontextprotocol.io/docs/concepts/architecture
+https://www.anthropic.com/news/visible-extended-thinking
+https://github.com/PhillipRt/think-mcp-server
+https://github.com/itseasy21/mcp-knowledge-graph
+https://github.com/eyaltoledano/claude-task-master
+https://simonwillison.net/2025/Mar/21/the-think-tool/#:~:text=%7B%20,
+
+
+
 ## Key Differences from TypeScript Version
 
 - **Installation**: Uses Python package managers (uv) instead of npm
