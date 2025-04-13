@@ -98,39 +98,39 @@ mcp-think-tank-nextgen/
 
 ## Phase 2: Advanced Knowledge Graph with `.jsonl` Storage
 
-- [ ] **Incremental JSONL Persistence**
-- [ ] **Design the `.jsonl` format** so each line is either:
+- [x] **Incremental JSONL Persistence**
+- [x] **Design the `.jsonl` format** so each line is either:
   - A record describing an **entity creation** (with `name`, `type`, `observations`).
   - A record describing a **relation** (with `from`, `to`, `relation_type`).
   - A record describing **update** or **deletion**.
-- [ ] On server startup, parse every line in `.jsonl` to rebuild the in-memory data structures:
+- [x] On server startup, parse every line in `.jsonl` to rebuild the in-memory data structures:
   - `entities: Dict[str, Entity]`
   - `relations: List[Relation]` or a more advanced adjacency structure.
-- [ ] Each time we add or modify an entity/relation, **append** a new line reflecting the change. 
+- [x] Each time we add or modify an entity/relation, **append** a new line reflecting the change. 
   - For deletes, append a line marking the item as deleted. 
   - Regularly (e.g. weekly) auto-compact the file to remove old or overwritten lines.
 
-- [ ] **KnowledgeGraph Class (Memory)**
-- [ ] Provide methods:
+- [x] **KnowledgeGraph Class (Memory)**
+- [x] Provide methods:
   - `add_entity(...)`: checks memory first; if new, adds in memory & appends to `.jsonl`.
   - `add_relation(...)`: same approach, ensures no duplicates. 
   - `update_entity(...)`: if we want to add new observations or rename an entity.
   - `delete_entity(...)`: appends a delete marker, removes from memory dict.
   - `search_nodes(query: str, use_semantic: bool = True)`: by default, do **semantic** search (detailed below).
-- [ ] Include metadata (timestamps, user/system actor) to track who/what caused each line.
-- [ ] Maintain an in-memory index for immediate lookups; `.jsonl` is the single source of truth on disk.
+- [x] Include metadata (timestamps, user/system actor) to track who/what caused each line.
+- [x] Maintain an in-memory index for immediate lookups; `.jsonl` is the single source of truth on disk.
 
-- [ ] **Automated Embeddings & Semantic Search** (**Mandatory**)
-- [ ] Use `sentence-transformers` or `langchain` to generate embeddings for each entity's observations.
-- [ ] Store these embeddings in memory (e.g. in a `Dict[str, np.ndarray]`) or optionally in `.jsonl` for fallback re-load.
-- [ ] `search_nodes(query, use_semantic=True)`:
+- [x] **Automated Embeddings & Semantic Search** (**Mandatory**)
+- [x] Use `sentence-transformers` or `langchain` to generate embeddings for each entity's observations.
+- [x] Store these embeddings in memory (e.g. in a `Dict[str, np.ndarray]`) or optionally in `.jsonl` for fallback re-load.
+- [x] `search_nodes(query, use_semantic=True)`:
   - Convert `query` → embedding, compute similarity with each entity's vector, and return top-k matches.
   - Fall back on keyword matching if no embeddings are found or if `USE_EMBEDDINGS=False`.
-- [ ] On each new observation, auto-generate embeddings and store them. Re-append to `.jsonl` with the vector data or store offline in a parallel file.
+- [x] On each new observation, auto-generate embeddings and store them. Re-append to `.jsonl` with the vector data or store offline in a parallel file.
 
-- [ ] **Error Handling & Logging**
-- [ ] Any file I/O error (permissions, disk full) should be logged with a robust message and not crash the server.
-- [ ] Maintain a minimal local log (e.g. `mcp-think-tank.log`) for diagnosing memory changes or failures.
+- [x] **Error Handling & Logging**
+- [x] Any file I/O error (permissions, disk full) should be logged with a robust message and not crash the server.
+- [x] Maintain a minimal local log (e.g. `mcp-think-tank.log`) for diagnosing memory changes or failures.
 
 ---
 

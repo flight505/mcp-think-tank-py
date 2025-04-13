@@ -8,10 +8,9 @@ from typing import Dict, List, Optional, Any
 
 from fastmcp import FastMCP
 
-# Local imports (will implement these in later steps)
-# from .tools.memory import KnowledgeGraph
-# from .tools.think import ThinkTool
-# from .tools.tasks import TaskManager
+# Local imports
+from .config import get_config
+from .tools.memory import KnowledgeGraph
 
 logger = logging.getLogger("mcp-think-tank.orchestrator")
 
@@ -29,16 +28,39 @@ class Orchestrator:
         self.tools = {}
         logger.info("Orchestrator initialized")
         
-        # These component references will be set when we register tools
+        # Load configuration
+        self.config = get_config()
+        
+        # Initialize component references
         self.kg = None  # Knowledge Graph
         self.think_tool = None  # Think Tool
         self.task_manager = None  # Task Manager
+        
+        # Initialize knowledge graph
+        self._init_knowledge_graph()
+    
+    def _init_knowledge_graph(self):
+        """Initialize the knowledge graph component"""
+        try:
+            self.kg = KnowledgeGraph(
+                memory_file_path=self.config.memory_file_path,
+                use_embeddings=self.config.use_embeddings
+            )
+            logger.info("Knowledge graph initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize knowledge graph: {e}")
+            # Create a fallback in-memory knowledge graph
+            self.kg = KnowledgeGraph(
+                memory_file_path=self.config.memory_file_path,
+                use_embeddings=False
+            )
+            logger.warning("Using fallback in-memory knowledge graph without embeddings")
     
     def register_tools(self) -> None:
         """Register all tools and resources with the MCP server"""
         logger.info("Registering tools with MCP server")
         
-        # Initialize and register tools (will implement in future steps)
+        # Initialize and register tools
         self._register_memory_tools()
         self._register_think_tools()
         self._register_task_tools()
@@ -48,55 +70,184 @@ class Orchestrator:
     
     def _register_memory_tools(self) -> None:
         """Register knowledge graph and memory tools"""
-        # Placeholder for later implementation
-        logger.info("Memory tools registration placeholder")
+        logger.info("Registering memory tools")
         
-        # Example of what this will look like later:
-        # self.kg = KnowledgeGraph()
-        # 
-        # @self.mcp.tool()
-        # def create_entities(entities: List[Dict[str, Any]]) -> Dict[str, Any]:
-        #     """Create multiple entities in the knowledge graph"""
-        #     return self.kg.create_entities(entities)
+        # Create entities
+        @self.mcp.tool()
+        def create_entities(entities: List[Dict[str, Any]]) -> Dict[str, Any]:
+            """
+            Create multiple new entities in the knowledge graph
+            
+            Args:
+                entities: Array of entities to create with name, entityType, and observations
+                
+            Returns:
+                Dict with created and existing entity names
+            """
+            result = self.kg.create_entities(entities)
+            self.tools["create_entities"] = "memory"
+            return result
+        
+        # Create relations
+        @self.mcp.tool()
+        def create_relations(relations: List[Dict[str, Any]]) -> Dict[str, Any]:
+            """
+            Create multiple new relations between entities in the knowledge graph
+            
+            Args:
+                relations: Array of relations to create with from, to, and relationType
+                
+            Returns:
+                Dict with created and failed relations
+            """
+            result = self.kg.create_relations(relations)
+            self.tools["create_relations"] = "memory"
+            return result
+        
+        # Add observations
+        @self.mcp.tool()
+        def add_observations(observations: List[Dict[str, Any]]) -> Dict[str, Any]:
+            """
+            Add new observations to existing entities in the knowledge graph
+            
+            Args:
+                observations: Array of entity observations to add with entityName and contents
+                
+            Returns:
+                Dict with updated and not_found entity names
+            """
+            result = self.kg.add_observations(observations)
+            self.tools["add_observations"] = "memory"
+            return result
+        
+        # Delete entities
+        @self.mcp.tool()
+        def delete_entities(entityNames: List[str]) -> Dict[str, Any]:
+            """
+            Delete multiple entities and their associated relations from the knowledge graph
+            
+            Args:
+                entityNames: Array of entity names to delete
+                
+            Returns:
+                Dict with deleted and not_found entity names
+            """
+            result = self.kg.delete_entities(entityNames)
+            self.tools["delete_entities"] = "memory"
+            return result
+        
+        # Delete observations
+        @self.mcp.tool()
+        def delete_observations(deletions: List[Dict[str, Any]]) -> Dict[str, Any]:
+            """
+            Delete specific observations from entities in the knowledge graph
+            
+            Args:
+                deletions: Array of entity observations to delete with entityName and observations
+                
+            Returns:
+                Dict with updated and not_found entity names
+            """
+            result = self.kg.delete_observations(deletions)
+            self.tools["delete_observations"] = "memory"
+            return result
+        
+        # Delete relations
+        @self.mcp.tool()
+        def delete_relations(relations: List[Dict[str, Any]]) -> Dict[str, Any]:
+            """
+            Delete multiple relations from the knowledge graph
+            
+            Args:
+                relations: Array of relations to delete with from, to, and relationType
+                
+            Returns:
+                Dict with deleted and not_found relations
+            """
+            result = self.kg.delete_relations(relations)
+            self.tools["delete_relations"] = "memory"
+            return result
+        
+        # Read entire graph
+        @self.mcp.tool()
+        def read_graph(dummy: str = "") -> Dict[str, Any]:
+            """
+            Read the entire knowledge graph
+            
+            Returns:
+                Dict with entities and relations
+            """
+            result = self.kg.read_graph()
+            self.tools["read_graph"] = "memory"
+            return result
+        
+        # Search nodes
+        @self.mcp.tool()
+        def search_nodes(query: str) -> List[Dict[str, Any]]:
+            """
+            Search for nodes in the knowledge graph based on a query
+            
+            Args:
+                query: Search query to find matching entities
+                
+            Returns:
+                List of matching entities
+            """
+            result = self.kg.search_nodes(query)
+            self.tools["search_nodes"] = "memory"
+            return result
+        
+        # Open nodes
+        @self.mcp.tool()
+        def open_nodes(names: List[str]) -> List[Dict[str, Any]]:
+            """
+            Open specific nodes in the knowledge graph by their names
+            
+            Args:
+                names: Array of entity names to retrieve
+                
+            Returns:
+                List of entity data
+            """
+            result = self.kg.open_nodes(names)
+            self.tools["open_nodes"] = "memory"
+            return result
+        
+        # Update entities
+        @self.mcp.tool()
+        def update_entities(entities: List[Dict[str, Any]]) -> Dict[str, Any]:
+            """
+            Update multiple existing entities in the knowledge graph
+            
+            Args:
+                entities: Array of entities to update with name and optional entityType/observations
+                
+            Returns:
+                Dict with updated and not_found entity names
+            """
+            result = self.kg.update_entities(entities)
+            self.tools["update_entities"] = "memory"
+            return result
+        
+        # Update relations is not needed since we can delete and recreate them
     
     def _register_think_tools(self) -> None:
         """Register thinking and reasoning tools"""
-        # Placeholder for later implementation
         logger.info("Think tools registration placeholder")
         
-        # Example of what this will look like later:
-        # self.think_tool = ThinkTool()
-        # 
-        # @self.mcp.tool()
-        # def think(structured_reasoning: str, store_in_memory: bool = False) -> str:
-        #     """Use this tool to think about something"""
-        #     return self.think_tool.process(structured_reasoning, store_in_memory)
+        # Will implement in future steps
     
     def _register_task_tools(self) -> None:
         """Register task management tools"""
-        # Placeholder for later implementation
         logger.info("Task tools registration placeholder")
         
-        # Example of what this will look like later:
-        # self.task_manager = TaskManager()
-        # 
-        # @self.mcp.tool()
-        # def create_tasks(prd_text: str) -> str:
-        #     """Create tasks from project requirements"""
-        #     return self.task_manager.create_tasks(prd_text)
+        # Will implement in future steps
     
     def _register_orchestrator_workflows(self) -> None:
         """Register orchestrated workflows that combine multiple tools"""
-        # Placeholder for later implementation
         logger.info("Orchestrator workflows registration placeholder")
         
-        # Example of what this will look like later:
-        # @self.mcp.tool()
-        # def auto_plan_workflow(prd_text: str) -> str:
-        #     """Automatically plan a workflow from requirements"""
-        #     tasks = self.task_manager.create_tasks(prd_text)
-        #     reflection = self.think_tool.process(f"Reflecting on tasks: {tasks}")
-        #     return f"Plan created with tasks and reflection: {reflection}"
+        # Will implement in future steps
 
     def auto_retrieve_memory(self, query: str, limit: int = 3) -> List[Dict[str, Any]]:
         """
@@ -109,6 +260,12 @@ class Orchestrator:
         Returns:
             List of relevant memory entries
         """
-        # Placeholder until we implement the knowledge graph
-        logger.info(f"Memory retrieval placeholder for query: {query}")
-        return [] 
+        if not self.kg:
+            logger.warning("Knowledge graph not initialized, cannot retrieve memory")
+            return []
+            
+        try:
+            return self.kg.search_nodes(query, limit=limit)
+        except Exception as e:
+            logger.error(f"Error retrieving memory: {e}")
+            return [] 
