@@ -7,7 +7,7 @@ name = "mcp-think-tank"
 version = "0.1.0"
 description = "MCP Think Tank - Advanced knowledge graph and reasoning tools"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "MCP Think Tank Team", email = "example@example.com"}

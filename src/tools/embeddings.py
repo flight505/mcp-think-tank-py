@@ -3,9 +3,8 @@
 Embeddings module for vector-based retrieval of semantic memory
 """
 import logging
-import os
 import hashlib
-from typing import Dict, List, Optional, Any, Union, Tuple
+from typing import Dict, List, Optional, Any
 import time
 
 import numpy as np
@@ -31,7 +30,7 @@ class EmbeddingProvider:
         self.model_name = model_name
         self.model = None
         # Initialize embedding cache
-        self.embedding_cache = LRUCache[List[float]](capacity=cache_capacity, ttl=cache_ttl)
+        self.embedding_cache = LRUCache[str, List[float]](capacity=cache_capacity, ttl=cache_ttl)
         self.batch_size = 64  # Batch size for bulk embedding operations
         self._init_model()
     
@@ -199,7 +198,11 @@ class EmbeddingProvider:
             results.append({"id": id, "similarity": similarity})
         
         # Sort by similarity (descending)
-        results.sort(key=lambda x: x["similarity"], reverse=True)
+        # Using a separate function to handle mypy type checking
+        def get_similarity(item: Dict[str, Any]) -> float:
+            return item["similarity"]
+            
+        results.sort(key=get_similarity, reverse=True)
         
         # Return top matches
         return results[:limit]
@@ -241,7 +244,10 @@ class EmbeddingProvider:
                 results.append({"id": id, "data": data, "similarity": similarity})
             
             # Sort by similarity (descending)
-            results.sort(key=lambda x: x["similarity"], reverse=True)
+            def get_similarity(item: Dict[str, Any]) -> float:
+                return item["similarity"]
+                
+            results.sort(key=get_similarity, reverse=True)
             
             # Return top matches
             return results[:limit]

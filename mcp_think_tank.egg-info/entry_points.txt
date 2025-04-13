@@ -1,0 +1,2 @@
+[console_scripts]
+mcp-think-tank = src.cli:main

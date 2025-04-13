@@ -7,12 +7,13 @@ and error recovery.
 """
 
 import asyncio
+import hashlib
 import time
 import logging
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Set, Callable, Any, Optional, Union, Tuple
+from typing import Dict, List, Set, Callable, Any, Optional
 from graphlib import TopologicalSorter
 
 logger = logging.getLogger(__name__)
@@ -478,7 +479,7 @@ class DAGExecutor:
         timed_out = sum(1 for task in self.tasks.values() if task.status == TaskStatus.TIMED_OUT)
         skipped = sum(1 for task in self.tasks.values() if task.status == TaskStatus.SKIPPED)
         
-        logger.info(f"DAG Execution Metrics:")
+        logger.info("DAG Execution Metrics:")
         logger.info(f"  Total tasks: {len(self.tasks)}")
         logger.info(f"  Completed: {completed}")
         logger.info(f"  Failed: {failed}")
@@ -559,7 +560,7 @@ class DAGExecutor:
                     status = f" [{task.status.value}]" if task.status != TaskStatus.PENDING else ""
                     result.append(f"  - {node}{deps_str}{status}")
                     
-        except Exception as e:
+        except Exception:
             # Fall back to simple listing if there's a cycle or other issue
             result = ["DAG Structure (unordered due to possible cycle):"]
             for node, deps in sorted(self.dependencies.items()):

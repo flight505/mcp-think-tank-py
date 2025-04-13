@@ -7,9 +7,8 @@ import logging
 import time
 import asyncio
 from enum import Enum
-from typing import Dict, Any, Callable, Awaitable, Union, Optional, List
+from typing import Dict, Any, Union, Optional, List
 from functools import wraps
-import traceback
 import threading
 
 logger = logging.getLogger("mcp-think-tank.circuit_breaker")

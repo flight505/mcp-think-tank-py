@@ -8,11 +8,10 @@ import os
 import time
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
-from typing import Dict, List, Optional, Set, Any, Tuple, Union, Iterator
+from typing import Dict, List, Optional, Any
 
 import numpy as np
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
 
 from src.tools.embeddings import EmbeddingProvider
 
@@ -33,14 +32,24 @@ class Entity(BaseModel):
     """
     name: str
     entity_type: str = Field(alias="entityType")
-    observations: List[str] = []
+    observations: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: Optional[datetime] = None
     deleted: bool = False
     embedding: Optional[List[float]] = None
     
-    class Config:
-        populate_by_name = True
+    model_config = {
+        "populate_by_name": True,
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "name": "entity-123",
+                    "entityType": "concept",
+                    "observations": ["This is an observation about the entity"],
+                }
+            ]
+        }
+    }
 
 
 class Relation(BaseModel):
@@ -53,8 +62,9 @@ class Relation(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     deleted: bool = False
     
-    class Config:
-        populate_by_name = True
+    model_config = {
+        "populate_by_name": True
+    }
 
 
 class JournalRecord(BaseModel):
@@ -65,6 +75,13 @@ class JournalRecord(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     data: Dict[str, Any]
     actor: Optional[str] = None
+    
+    model_config = {
+        "json_encoders": {
+            datetime: lambda dt: dt.isoformat(),
+            RecordType: lambda rt: rt.value
+        }
+    }
 
 
 class KnowledgeGraph:
@@ -100,7 +117,7 @@ class KnowledgeGraph:
         # In-memory storage
         self.entities: Dict[str, Entity] = {}
         self.relations: List[Relation] = []
-        self.embedding_provider = None
+        self.embedding_provider: Optional[EmbeddingProvider] = None
         
         # File position tracking for incremental loading
         self.file_position = 0
@@ -135,6 +152,7 @@ class KnowledgeGraph:
         except Exception as e:
             logger.error(f"Failed to initialize embedding provider: {e}")
             self.use_embeddings = False
+            self.embedding_provider = None
     
     def _count_total_records(self):
         """Count the total number of records in the JSONL file"""
@@ -344,7 +362,7 @@ class KnowledgeGraph:
         Returns:
             A list of floats representing the embedding, or None if embeddings are disabled
         """
-        if not self.use_embeddings or not self.embedding_provider:
+        if not self.use_embeddings or self.embedding_provider is None:
             return None
             
         try:
@@ -366,7 +384,7 @@ class KnowledgeGraph:
         Returns:
             Dictionary mapping entity names to embeddings
         """
-        if not self.use_embeddings or not self.embedding_provider:
+        if not self.use_embeddings or self.embedding_provider is None:
             return {entity.name: None for entity in entities}
             
         try:
@@ -686,7 +704,7 @@ class KnowledgeGraph:
             return []
         
         # Use semantic search if enabled and available
-        if use_semantic and self.use_embeddings and self.embedding_provider:
+        if use_semantic and self.use_embeddings and self.embedding_provider is not None:
             return self._semantic_search(query, limit)
         else:
             return self._keyword_search(query, limit)
@@ -732,8 +750,16 @@ class KnowledgeGraph:
             List of matching entities
         """
         try:
+            # Ensure embedding provider exists
+            if self.embedding_provider is None:
+                return self._keyword_search(query, limit)
+                
             # Generate query embedding
             query_embedding = self.embedding_provider.generate_embedding(query)
+            
+            # If embedding generation failed, fall back to keyword search
+            if query_embedding is None:
+                return self._keyword_search(query, limit)
             
             # Calculate similarity for each entity
             results = []
@@ -749,7 +775,7 @@ class KnowledgeGraph:
                     np.linalg.norm(query_embedding) * np.linalg.norm(entity_embedding)
                 )
                 
-                results.append((entity, similarity))
+                results.append((entity, float(similarity)))
             
             # Sort by similarity (descending) and get top matches
             results.sort(key=lambda x: x[1], reverse=True)
@@ -1007,7 +1033,12 @@ class KnowledgeGraph:
         Returns:
             Dictionary with statistics
         """
-        stats = {
+        # Check file size
+        file_size = 0
+        if os.path.exists(self.memory_file_path):
+            file_size = os.path.getsize(self.memory_file_path)
+            
+        stats: Dict[str, Any] = {
             "entities_count": len(self.entities),
             "relations_count": len(self.relations),
             "total_records": self.total_records,
@@ -1015,12 +1046,12 @@ class KnowledgeGraph:
             "fully_loaded": self.fully_loaded,
             "load_time": self.load_time,
             "last_operation_time": self.last_operation_time,
-            "memory_file_size": os.path.getsize(self.memory_file_path) if os.path.exists(self.memory_file_path) else 0,
+            "memory_file_size": file_size,
             "use_embeddings": self.use_embeddings
         }
         
         # Add embedding cache stats if available
-        if self.use_embeddings and self.embedding_provider:
+        if self.use_embeddings and self.embedding_provider is not None:
             stats["embedding_cache"] = self.embedding_provider.get_cache_stats()
             
         return stats
@@ -1044,7 +1075,7 @@ class KnowledgeGraph:
             self.relations = [relation for relation in self.relations if not relation.deleted]
         
         # Optimize embedding cache if available
-        if self.use_embeddings and self.embedding_provider:
+        if self.use_embeddings and self.embedding_provider is not None:
             self.embedding_provider.optimize_memory()
         
         # Force garbage collection
@@ -1061,4 +1092,192 @@ class KnowledgeGraph:
             "relations_removed": initial_relations - len(self.relations),
             "optimization_time": optimization_time,
             "message": f"Memory optimized in {optimization_time:.2f}s"
+        }
+
+class MemoryTool:
+    """
+    Tool wrapper for Knowledge Graph to expose methods as MCP tools.
+    
+    This class wraps the KnowledgeGraph class and provides methods
+    that can be registered with the MCP server.
+    """
+    
+    def __init__(self, use_basic: bool = False):
+        """
+        Initialize the memory tool.
+        
+        Args:
+            use_basic: If True, use a simplified version with reduced functionality
+        """
+        # Get configuration
+        from src.config import get_config, validate_config
+        
+        config = get_config()
+        
+        try:
+            validate_config(config)
+        except ValueError as e:
+            logger.warning(f"Config validation failed: {e}")
+            logger.warning("Using basic memory configuration")
+            use_basic = True
+        
+        if use_basic:
+            # Use basic configuration for simplified functionality
+            memory_file_path = os.path.expanduser("~/.mcp-think-tank/memory.jsonl")
+            self.knowledge_graph = KnowledgeGraph(
+                memory_file_path=memory_file_path,
+                use_embeddings=False,
+                load_limit=100,
+                load_deleted=False
+            )
+        else:
+            # Use full configuration
+            self.knowledge_graph = KnowledgeGraph(
+                memory_file_path=config.memory_file_path,
+                use_embeddings=config.use_embeddings,
+                embedding_cache_size=10000,
+                load_limit=None,
+                load_deleted=False
+            )
+        
+        logger.info("Memory Tool initialized")
+    
+    # Wrap KnowledgeGraph methods for MCP tool registration
+    
+    def create_entities(self, entities: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Create multiple new entities in the knowledge graph
+        
+        Args:
+            entities: Array of entities to create
+            
+        Returns:
+            Dict with results of entity creation
+        """
+        return self.knowledge_graph.create_entities(entities)
+    
+    def create_relations(self, relations: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Create multiple new relations between entities in the knowledge graph
+        
+        Args:
+            relations: Array of relations to create
+            
+        Returns:
+            Dict with results of relation creation
+        """
+        return self.knowledge_graph.create_relations(relations)
+    
+    def add_observations(self, observations: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Add new observations to existing entities in the knowledge graph
+        
+        Args:
+            observations: Array of entity observations to add
+            
+        Returns:
+            Dict with results of observation addition
+        """
+        return self.knowledge_graph.add_observations(observations)
+    
+    def delete_entities(self, entityNames: List[str]) -> Dict[str, Any]:
+        """
+        Delete multiple entities and their associated relations
+        
+        Args:
+            entityNames: Array of entity names to delete
+            
+        Returns:
+            Dict with results of entity deletion
+        """
+        return self.knowledge_graph.delete_entities(entityNames)
+    
+    def delete_observations(self, deletions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Delete specific observations from entities
+        
+        Args:
+            deletions: Array of entity observations to delete
+            
+        Returns:
+            Dict with results of observation deletion
+        """
+        return self.knowledge_graph.delete_observations(deletions)
+    
+    def delete_relations(self, relations: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Delete multiple relations from the knowledge graph
+        
+        Args:
+            relations: Array of relations to delete
+            
+        Returns:
+            Dict with results of relation deletion
+        """
+        return self.knowledge_graph.delete_relations(relations)
+    
+    def read_graph(self, dummy: str = "") -> Dict[str, Any]:
+        """
+        Read the entire knowledge graph
+        
+        Returns:
+            Dict with the complete knowledge graph data
+        """
+        return self.knowledge_graph.read_graph()
+    
+    def search_nodes(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Search for nodes in the knowledge graph based on a query
+        
+        Args:
+            query: Search query to find matching entities
+            
+        Returns:
+            List of matching entities
+        """
+        return self.knowledge_graph.search_nodes(query)
+    
+    def open_nodes(self, names: List[str]) -> List[Dict[str, Any]]:
+        """
+        Open specific nodes in the knowledge graph by their names
+        
+        Args:
+            names: Array of entity names to retrieve
+            
+        Returns:
+            List of retrieved entities
+        """
+        return self.knowledge_graph.open_nodes(names)
+    
+    def update_entities(self, entities: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Update multiple existing entities in the knowledge graph
+        
+        Args:
+            entities: Array of entities to update
+            
+        Returns:
+            Dict with results of entity updates
+        """
+        return self.knowledge_graph.update_entities(entities)
+    
+    def update_relations(self, relations: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Update multiple existing relations in the knowledge graph
+        
+        Args:
+            relations: Array of relations to update
+            
+        Returns:
+            Dict with results of relation updates
+        """
+        # This functionality is not directly provided by KnowledgeGraph
+        # We can implement it by deleting and recreating relations
+        deleted = self.knowledge_graph.delete_relations(relations)
+        created = self.knowledge_graph.create_relations(relations)
+        
+        return {
+            "updated": [r for r in relations if r in created.get("created", [])],
+            "failed": created.get("failed", []),
+            "message": f"Updated {len(created.get('created', []))} relations. {len(created.get('failed', []))} failed to update."
         } 

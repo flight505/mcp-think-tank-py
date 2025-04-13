@@ -17,6 +17,7 @@ class Config:
     # Feature flags
     use_embeddings: bool
     enable_reflexion: bool
+    use_local_model: bool
     
     # API Keys (optional)
     anthropic_api_key: Optional[str] = None
@@ -25,7 +26,6 @@ class Config:
     project_path: Optional[str] = None
     
     # Local model configuration
-    use_local_model: bool
     local_model_path: Optional[str] = None
 
 

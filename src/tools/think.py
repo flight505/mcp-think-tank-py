@@ -23,6 +23,19 @@ class Thought(BaseModel):
     entity_association: Optional[str] = None
     reflection: Optional[str] = None
     reflection_timestamp: Optional[str] = None
+    
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "id": "12345-uuid",
+                    "structured_reasoning": "This is structured reasoning about a topic",
+                    "category": "analysis",
+                    "tags": ["important", "decision"]
+                }
+            ]
+        }
+    }
 
 class ThinkTool:
     """

@@ -9,11 +9,20 @@ import os
 import time
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional, Any, Union, Callable
+from typing import Dict, Any, Optional, Callable, TypeVar, List
+
 import threading
 import atexit
 
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 logger = logging.getLogger("mcp-think-tank.monitoring")
+
+T = TypeVar("T")
+
 
 class MetricType(str, Enum):
     """Types of metrics to track"""
@@ -99,6 +108,8 @@ class MetricsCollector:
             elif metric_type == MetricType.GAUGE:
                 metric["last_value"] = value
             elif metric_type == MetricType.HISTOGRAM or metric_type == MetricType.TIMER:
+                if not isinstance(metric["values"], list):
+                    metric["values"] = []
                 metric["values"].append(value)
                 metric["count"] += 1
                 metric["sum"] += value
@@ -154,7 +165,7 @@ class MetricsCollector:
         """
         self.track(name, value, MetricType.HISTOGRAM, labels)
     
-    def time_this(self, name: str, labels: Optional[Dict[str, str]] = None) -> Callable:
+    def time_this(self, name: str, labels: Optional[Dict[str, str]] = None) -> Callable[[Callable[..., T]], Callable[..., T]]:
         """
         Timer decorator for measuring function execution time
         
@@ -165,8 +176,8 @@ class MetricsCollector:
         Returns:
             Decorator function
         """
-        def decorator(func):
-            def wrapper(*args, **kwargs):
+        def decorator(func: Callable[..., T]) -> Callable[..., T]:
+            def wrapper(*args: Any, **kwargs: Any) -> T:
                 start_time = time.time()
                 result = func(*args, **kwargs)
                 execution_time = time.time() - start_time
@@ -193,8 +204,8 @@ class MetricsCollector:
                     # Skip metrics with no data
                     if (metric["type"] == MetricType.COUNTER and metric["count"] == 0) or \
                        (metric["type"] == MetricType.GAUGE and metric["last_value"] is None) or \
-                       (metric["type"] == MetricType.HISTOGRAM and len(metric["values"]) == 0) or \
-                       (metric["type"] == MetricType.TIMER and len(metric["values"]) == 0):
+                       (metric["type"] == MetricType.HISTOGRAM and not metric["values"]) or \
+                       (metric["type"] == MetricType.TIMER and not metric["values"]):
                         continue
                     
                     # Calculate statistics for histograms and timers
@@ -203,7 +214,7 @@ class MetricsCollector:
                         
                         # Calculate percentiles if we have enough data
                         percentiles = {}
-                        if len(metric["values"]) > 0:
+                        if metric["values"]:
                             sorted_values = sorted(metric["values"])
                             for p in [50, 90, 95, 99]:
                                 idx = min(int(len(sorted_values) * p / 100), len(sorted_values) - 1)
@@ -258,7 +269,7 @@ class MetricsCollector:
                     
                     # Calculate percentiles if we have enough data
                     percentiles = {}
-                    if len(metric["values"]) > 0:
+                    if metric["values"]:
                         sorted_values = sorted(metric["values"])
                         for p in [50, 90, 95, 99]:
                             idx = min(int(len(sorted_values) * p / 100), len(sorted_values) - 1)
@@ -374,8 +385,11 @@ def track_memory_usage(tool_name: Optional[str] = None) -> None:
     Args:
         tool_name: Optional tool name to associate with memory usage
     """
+    if psutil is None:
+        logger.warning("psutil not installed, cannot track memory usage")
+        return
+
     try:
-        import psutil
         process = psutil.Process(os.getpid())
         memory_info = process.memory_info()
         
@@ -383,8 +397,6 @@ def track_memory_usage(tool_name: Optional[str] = None) -> None:
         labels = {"tool": tool_name} if tool_name else None
         metrics.gauge("memory_rss_bytes", memory_info.rss, labels)
         metrics.gauge("memory_vms_bytes", memory_info.vms, labels)
-    except ImportError:
-        logger.warning("psutil not installed, cannot track memory usage")
     except Exception as e:
         logger.error(f"Failed to track memory usage: {e}")
 

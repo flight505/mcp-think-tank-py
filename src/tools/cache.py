@@ -1,186 +1,188 @@
 #!/usr/bin/env python3
 """
-Cache implementation for MCP Think Tank
-Provides LRU (Least Recently Used) caching to improve performance
+Caching utilities for MCP Think Tank
+Provides various caching mechanisms to optimize performance
 """
 import time
-import logging
+import threading
+from datetime import datetime
+from typing import Dict, Any, Optional, TypeVar, Generic, List, Callable, Tuple, OrderedDict as OrderedDictType
 from collections import OrderedDict
-from typing import Any, Dict, Optional, Tuple, List, Callable, TypeVar, Generic
 
-logger = logging.getLogger("mcp-think-tank.cache")
 
-T = TypeVar('T')  # Generic type for cache values
+K = TypeVar("K")
+V = TypeVar("V")
 
-class LRUCache(Generic[T]):
+
+class LRUCache(Generic[K, V]):
     """
-    Least Recently Used (LRU) cache implementation
-    
-    Provides fast O(1) lookups with automatic eviction of least recently used items
-    when capacity is reached. Supports optional Time-To-Live (TTL) for entries.
+    Least Recently Used (LRU) Cache implementation
+    Efficiently caches items, evicting least recently used items when capacity is reached
     """
-    
-    def __init__(self, capacity: int = 1000, ttl: Optional[int] = None):
+
+    def __init__(self, capacity: int = 100, ttl: Optional[int] = None):
         """
-        Initialize the LRU Cache
-        
+        Initialize LRU Cache
+
         Args:
-            capacity: Maximum number of items to store (default: 1000)
-            ttl: Optional time-to-live in seconds for cache entries (default: None)
+            capacity: Maximum number of items to store in the cache
+            ttl: Time-to-live in seconds (optional)
         """
-        self.capacity = max(capacity, 1)  # Ensure capacity is at least 1
+        self.capacity = max(1, capacity)
         self.ttl = ttl
-        self.cache: OrderedDict[str, Tuple[T, float]] = OrderedDict()
-        self.hits = 0
-        self.misses = 0
-    
-    def get(self, key: str) -> Optional[T]:
+        self.cache: OrderedDictType[K, Tuple[V, float]] = OrderedDict()
+        self.lock = threading.RLock()
+        self.hit_count = 0
+        self.miss_count = 0
+
+    def get(self, key: K) -> Optional[V]:
         """
-        Get item from cache
-        
+        Get an item from the cache
+
         Args:
-            key: Cache key
-            
+            key: The key to look up
+
         Returns:
-            Cached value or None if not found or expired
+            The cached value or None if not found or expired
         """
-        if key not in self.cache:
-            self.misses += 1
-            return None
-            
-        value, timestamp = self.cache[key]
-        
-        # Check TTL if enabled
-        if self.ttl is not None and time.time() - timestamp > self.ttl:
-            # Remove expired item
-            self.cache.pop(key)
-            self.misses += 1
-            return None
-            
-        # Move to end (most recently used)
-        self.cache.move_to_end(key)
-        self.hits += 1
-        return value
-    
-    def put(self, key: str, value: T) -> None:
+        with self.lock:
+            if key not in self.cache:
+                self.miss_count += 1
+                return None
+
+            value, timestamp = self.cache[key]
+
+            # Check if expired
+            if self.ttl is not None and time.time() - timestamp > self.ttl:
+                self.cache.pop(key)
+                self.miss_count += 1
+                return None
+
+            # Move to end (most recently used)
+            self.cache.move_to_end(key)
+            self.hit_count += 1
+            return value
+
+    def put(self, key: K, value: V) -> None:
         """
-        Put item in cache
-        
+        Put an item in the cache
+
         Args:
-            key: Cache key
-            value: Value to cache
+            key: The key to store
+            value: The value to cache
         """
-        # Remove if already exists to update position
-        if key in self.cache:
-            self.cache.pop(key)
-            
-        # Add new item with current timestamp
-        self.cache[key] = (value, time.time())
-        
-        # Remove oldest item if capacity exceeded
-        if len(self.cache) > self.capacity:
-            self.cache.popitem(last=False)
-            
-    def remove(self, key: str) -> bool:
+        with self.lock:
+            # Update or insert
+            self.cache[key] = (value, time.time())
+            self.cache.move_to_end(key)
+
+            # Evict oldest item if over capacity
+            if len(self.cache) > self.capacity:
+                self.cache.popitem(last=False)
+
+    def remove(self, key: K) -> bool:
         """
-        Remove item from cache
-        
+        Remove an item from the cache
+
         Args:
-            key: Cache key
-            
+            key: The key to remove
+
         Returns:
-            True if item was removed, False if not found
+            True if the key was removed, False otherwise
         """
-        if key in self.cache:
-            self.cache.pop(key)
-            return True
-        return False
-    
+        with self.lock:
+            if key in self.cache:
+                self.cache.pop(key)
+                return True
+            return False
+
     def clear(self) -> None:
-        """Clear all items from cache"""
-        self.cache.clear()
-        
+        """Clear all items from the cache"""
+        with self.lock:
+            self.cache.clear()
+            self.hit_count = 0
+            self.miss_count = 0
+
+    def contains(self, key: K) -> bool:
+        """
+        Check if a key is in the cache (and not expired)
+
+        Args:
+            key: The key to check
+
+        Returns:
+            True if the key exists and is not expired, False otherwise
+        """
+        with self.lock:
+            if key not in self.cache:
+                return False
+
+            # Check if expired
+            if self.ttl is not None:
+                _, timestamp = self.cache[key]
+                if time.time() - timestamp > self.ttl:
+                    self.cache.pop(key)
+                    return False
+
+            return True
+
+    def get_or_compute(self, key: K, compute_func: Callable[[], V]) -> V:
+        """
+        Get a value from the cache or compute and store it if not present
+
+        Args:
+            key: The key to look up
+            compute_func: Function to compute the value if not in cache
+
+        Returns:
+            The cached or computed value
+        """
+        with self.lock:
+            value = self.get(key)
+            if value is None:
+                value = compute_func()
+                self.put(key, value)
+            return value
+
     def get_stats(self) -> Dict[str, Any]:
         """
         Get cache statistics
-        
+
         Returns:
             Dictionary with cache statistics
         """
-        total_requests = self.hits + self.misses
-        hit_rate = self.hits / total_requests if total_requests > 0 else 0
-        
-        return {
-            "capacity": self.capacity,
-            "size": len(self.cache),
-            "utilization": len(self.cache) / self.capacity if self.capacity > 0 else 0,
-            "ttl": self.ttl,
-            "hits": self.hits,
-            "misses": self.misses,
-            "hit_rate": hit_rate
-        }
+        with self.lock:
+            total_access = self.hit_count + self.miss_count
+            hit_ratio = (
+                self.hit_count / total_access if total_access > 0 else 0
+            )
+            return {
+                "capacity": self.capacity,
+                "size": len(self.cache),
+                "hit_count": self.hit_count,
+                "miss_count": self.miss_count,
+                "hit_ratio": hit_ratio,
+                "ttl": self.ttl,
+            }
 
-    def contains(self, key: str) -> bool:
+    def get_keys(self) -> List[K]:
         """
-        Check if key exists in cache and is not expired
-        
-        Args:
-            key: Cache key
-            
+        Get all keys in the cache
+
         Returns:
-            True if key exists and is not expired, False otherwise
+            List of keys
         """
-        if key not in self.cache:
-            return False
-            
-        if self.ttl is not None:
-            _, timestamp = self.cache[key]
-            if time.time() - timestamp > self.ttl:
-                # Remove expired item
-                self.cache.pop(key)
-                return False
-                
-        return True
-        
-    def get_keys(self) -> List[str]:
-        """
-        Get all valid (non-expired) keys in the cache
-        
-        Returns:
-            List of cache keys
-        """
-        if self.ttl is None:
+        with self.lock:
             return list(self.cache.keys())
-            
-        # Filter out expired keys
-        valid_keys = []
-        current_time = time.time()
-        
-        for key, (_, timestamp) in list(self.cache.items()):
-            if current_time - timestamp <= self.ttl:
-                valid_keys.append(key)
-            else:
-                # Remove expired item
-                self.cache.pop(key)
-                
-        return valid_keys
-        
-    def get_or_compute(self, key: str, compute_fn: Callable[[], T]) -> T:
-        """
-        Get value from cache or compute it if not found
-        
-        Args:
-            key: Cache key
-            compute_fn: Function to compute value if not in cache
-            
-        Returns:
-            Cached or computed value
-        """
-        value = self.get(key)
-        if value is not None:
-            return value
-            
-        # Compute value and cache it
-        computed_value = compute_fn()
-        self.put(key, computed_value)
-        return computed_value 
+
+    def __len__(self) -> int:
+        """Get the number of items in the cache"""
+        with self.lock:
+            return len(self.cache)
+
+    def __contains__(self, key: object) -> bool:
+        """Check if a key is in the cache"""
+        try:
+            return self.contains(key)  # type: ignore
+        except Exception:
+            return False 

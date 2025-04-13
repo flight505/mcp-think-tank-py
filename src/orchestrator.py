@@ -5,34 +5,27 @@ Manages cross-tool intelligence and coordination
 """
 import logging
 import asyncio
-import inspect
-import json
 import os
 from typing import Dict, List, Optional, Any, Callable
 from datetime import datetime
 import uuid
 import time
 import traceback
-import sys
-import importlib.util
-from pathlib import Path
 
-from fastmcp import FastMCP
 from fastapi import FastAPI
-from fastmcp.server import MCPServer, WebsocketManager
+from fastmcp.server import FastMCP
 
 # Local imports
-from .config import get_config
-from .tools.memory import KnowledgeGraph, MemoryTool
+from .tools.memory import MemoryTool
 from .tools.think import ThinkTool
-from .tools.tasks import TaskManager, download_local_model, TasksTool
+from .tools.tasks import TasksTool
 from .watchers.file_watcher import FileWatcher
 from .tools.code_tools import CodeTools
 from .tools.dag_orchestrator import DAGExecutor, EmbeddingCache
-from .tools.workflow_templates import WorkflowFactory, WorkflowTemplate
+from .tools.workflow_templates import WorkflowFactory
 from .tools.workflow_error_handler import WorkflowErrorHandler, TimeoutManager
 from .tools.circuit_breaker import CircuitBreakerManager, CircuitOpenError
-from src.tools.monitoring import PerformanceTracker, track_tool_call, track_memory_usage
+from src.tools.monitoring import PerformanceTracker, track_memory_usage
 
 logger = logging.getLogger("mcp-think-tank.orchestrator")
 
@@ -45,17 +38,14 @@ class Orchestrator:
     various tool instances.
     """
     
-    def __init__(self, app: FastAPI, websocket_manager: WebsocketManager):
+    def __init__(self, mcp: FastMCP):
         """
         Initialize the orchestrator.
         
         Args:
-            app: The FastAPI application instance
-            websocket_manager: The WebsocketManager for real-time communication
+            mcp: The FastMCP instance
         """
-        self.app = app
-        self.websocket_manager = websocket_manager
-        self.mcp_server = MCPServer(app, websocket_manager)
+        self.mcp = mcp
         
         # Initialize tools with monitoring
         self._init_components_with_monitoring()
@@ -542,7 +532,7 @@ class Orchestrator:
     
     def _register_memory_tools(self) -> None:
         """Register memory-related tools with the MCP server."""
-        self.mcp_server.register_tools(
+        self.mcp.register_tools(
             tool_name="think-tool",
             tool_description="Knowledge graph management tools",
             functions={
@@ -562,7 +552,7 @@ class Orchestrator:
     
     def _register_think_tools(self) -> None:
         """Register think tools with the MCP server."""
-        self.mcp_server.register_tools(
+        self.mcp.register_tools(
             tool_name="think-tool",
             tool_description="Thinking and reasoning tools",
             functions={
@@ -605,7 +595,7 @@ class Orchestrator:
     
     def _register_tasks_tools(self) -> None:
         """Register task management tools with the MCP server."""
-        self.mcp_server.register_tools(
+        self.mcp.register_tools(
             tool_name="mcp-taskmanager",
             tool_description="Task management tools",
             functions={
@@ -628,7 +618,7 @@ class Orchestrator:
             logger.warning("Code tools not initialized, skipping tool registration")
             return
             
-        self.mcp_server.register_tools(
+        self.mcp.register_tools(
             tool_name="code-tool",
             tool_description="Code analysis and manipulation tools",
             functions={
@@ -1058,7 +1048,7 @@ class Orchestrator:
         ]
         
         # Register workflow management tools
-        self.mcp_server.register_tools(
+        self.mcp.register_tools(
             tool_name="workflow-manager",
             tool_description="Tools for creating and managing workflow templates for common development tasks",
             functions=functions
@@ -1090,8 +1080,8 @@ class Orchestrator:
             
             # Define the actual function
             def _create_workflow():
-                workflow_id = f"workflow_{len(self._workflows) + 1}"
-                self._workflows[workflow_id] = {
+                workflow_id = f"workflow_{len(self.workflows) + 1}"
+                self.workflows[workflow_id] = {
                     "id": workflow_id,
                     "name": name,
                     "description": description,
@@ -1143,10 +1133,10 @@ class Orchestrator:
             Returns:
                 Dict containing task metadata
             """
-            if workflow_id not in self._workflows:
+            if workflow_id not in self.workflows:
                 return {"error": f"Workflow {workflow_id} not found"}
             
-            workflow = self._workflows[workflow_id]
+            workflow = self.workflows[workflow_id]
             dag_executor = workflow["dag_executor"]
             
             # Get the function to call
@@ -1182,7 +1172,7 @@ class Orchestrator:
             Returns:
                 Dict containing execution results and metrics
             """
-            if workflow_id not in self._workflows:
+            if workflow_id not in self.workflows:
                 return {"error": f"Workflow {workflow_id} not found"}
             
             # Generate a unique task ID for this operation
@@ -1190,7 +1180,7 @@ class Orchestrator:
             
             # Define the actual execution function
             async def _execute_workflow():
-                workflow = self._workflows[workflow_id]
+                workflow = self.workflows[workflow_id]
                 dag_executor = workflow["dag_executor"]
                 
                 # Update workflow status
@@ -1256,10 +1246,10 @@ class Orchestrator:
             Returns:
                 Dict containing workflow status and metrics
             """
-            if workflow_id not in self._workflows:
+            if workflow_id not in self.workflows:
                 return {"error": f"Workflow {workflow_id} not found"}
             
-            workflow = self._workflows[workflow_id]
+            workflow = self.workflows[workflow_id]
             dag_executor = workflow["dag_executor"]
             
             # Get execution summary
@@ -1284,10 +1274,10 @@ class Orchestrator:
             Returns:
                 Dict containing visualization data
             """
-            if workflow_id not in self._workflows:
+            if workflow_id not in self.workflows:
                 return {"error": f"Workflow {workflow_id} not found"}
             
-            workflow = self._workflows[workflow_id]
+            workflow = self.workflows[workflow_id]
             dag_executor = workflow["dag_executor"]
             
             # Get DAG visualization
@@ -1299,11 +1289,8 @@ class Orchestrator:
                 "visualization": visualization
             }
         
-        # Initialize workflows dictionary
-        self._workflows = {}
-        
         # Register DAG orchestration tools
-        self.mcp_server.register_tools(
+        self.mcp.register_tools(
             tool_name="dag-orchestrator",
             tool_description="Tools for orchestrating complex workflows with dependencies",
             functions={
@@ -1366,7 +1353,7 @@ class Orchestrator:
     def _register_error_tools(self):
         """Register error handling and circuit breaker tools with the MCP server."""
         # Register error summary tool
-        self.mcp_server.register_tool(
+        self.mcp.register_tool(
             "get_workflow_error_summary",
             {
                 "description": "Get a summary of all errors that occurred during workflow execution",
@@ -1382,7 +1369,7 @@ class Orchestrator:
         )
 
         # Register timeout management tools
-        self.mcp_server.register_tool(
+        self.mcp.register_tool(
             "update_task_timeout",
             {
                 "description": "Update the timeout for a task",
@@ -1399,7 +1386,7 @@ class Orchestrator:
         )
 
         # Register the adapt_timeout tool
-        self.mcp_server.register_tool(
+        self.mcp.register_tool(
             "adapt_task_timeout",
             {
                 "description": "Adapt the timeout for a task based on execution history",
@@ -1415,7 +1402,7 @@ class Orchestrator:
         )
         
         # Register circuit breaker tools
-        self.mcp_server.register_tool(
+        self.mcp.register_tool(
             "get_circuit_breaker_status",
             {
                 "description": "Get the status of a circuit breaker",
@@ -1430,7 +1417,7 @@ class Orchestrator:
             self._get_circuit_breaker_status
         )
         
-        self.mcp_server.register_tool(
+        self.mcp.register_tool(
             "reset_circuit_breaker",
             {
                 "description": "Reset a circuit breaker to its initial state",
@@ -1445,7 +1432,7 @@ class Orchestrator:
             self._reset_circuit_breaker
         )
         
-        self.mcp_server.register_tool(
+        self.mcp.register_tool(
             "get_all_circuit_breakers",
             {
                 "description": "Get status of all circuit breakers in the system",

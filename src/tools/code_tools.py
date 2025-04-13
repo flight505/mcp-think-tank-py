@@ -3,10 +3,8 @@
 Code Tools for MCP Think Tank
 Tools for searching and summarizing code in the codebase
 """
-import os
-import json
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 from ..watchers.file_watcher import FileWatcher
 
