@@ -10,6 +10,7 @@ import json
 import os
 from typing import Dict, List, Optional, Any, Callable
 from datetime import datetime
+import uuid
 
 from fastmcp import FastMCP
 from fastapi import FastAPI
@@ -23,6 +24,8 @@ from .tools.tasks import TaskManager, download_local_model, TasksTool
 from .watchers.file_watcher import FileWatcher
 from .tools.code_tools import CodeTools
 from .tools.dag_orchestrator import DAGExecutor, EmbeddingCache
+from .tools.workflow_templates import WorkflowFactory, WorkflowTemplate
+from .tools.workflow_error_handler import WorkflowErrorHandler, TimeoutManager
 
 logger = logging.getLogger("mcp-think-tank.orchestrator")
 
@@ -59,12 +62,20 @@ class Orchestrator:
         self.dag_executor = self._init_dag_executor()
         self.embedding_cache = self._init_embedding_cache()
         
+        # Initialize workflow factory and active workflows
+        self.workflow_factory = self._init_workflow_factory()
+        self.workflows = {}
+        self.error_handler = None
+        self.timeout_manager = None
+        
         # Register all tools with the MCP server
         self._register_memory_tools()
         self._register_think_tools()
         self._register_tasks_tools()
         self._register_code_tools()
         self._register_dag_tools()
+        self._register_workflow_tools()
+        self._init_error_handling()
 
     def _init_memory_tool(self) -> MemoryTool:
         """Initialize the memory tool."""
@@ -173,6 +184,41 @@ class Orchestrator:
             logger.error(f"Failed to initialize file watcher: {e}")
             return None
     
+    def _init_workflow_factory(self) -> WorkflowFactory:
+        """Initialize the workflow factory."""
+        try:
+            return WorkflowFactory(
+                memory_tool=self.memory_tool,
+                think_tool=self.think_tool,
+                tasks_tool=self.tasks_tool,
+                code_tool=self.code_tools
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize workflow factory: {e}")
+            # Try with minimal requirements
+            return WorkflowFactory(
+                memory_tool=self.memory_tool,
+                think_tool=self.think_tool
+            )
+    
+    def _init_error_handling(self):
+        """
+        Initialize error handling components for workflows.
+        
+        This method sets up the WorkflowErrorHandler and TimeoutManager
+        that are used for robust workflow execution with timeout
+        management and graceful error recovery.
+        """
+        try:
+            self.error_handler = WorkflowErrorHandler()
+            self.timeout_manager = TimeoutManager(default_timeout=60.0)  # 60 second default timeout
+            logger.info("Error handling components initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize error handling: {str(e)}")
+            # Create basic versions if initialization fails
+            self.error_handler = WorkflowErrorHandler()
+            self.timeout_manager = TimeoutManager()
+    
     def _register_memory_tools(self) -> None:
         """Register memory-related tools with the MCP server."""
         self.mcp_server.register_tools(
@@ -269,6 +315,435 @@ class Orchestrator:
                 "summarize_file": self.code_tools.summarize_file
             }
         )
+    
+    def _register_workflow_tools(self) -> None:
+        """
+        Register workflow-related tools with the MCP server.
+        
+        This method registers tools for creating and managing workflows
+        based on predefined templates.
+        """
+        async def create_feature_workflow(feature_description: str, workflow_id: Optional[str] = None) -> Dict[str, Any]:
+            """
+            Create a workflow for implementing a new feature.
+            
+            Args:
+                feature_description: Description of the feature to implement
+                workflow_id: Optional ID for the workflow (generated if not provided)
+                
+            Returns:
+                Dict containing workflow metadata
+            """
+            # Generate workflow ID if not provided
+            if not workflow_id:
+                workflow_id = f"feature_{len(self.workflows) + 1}"
+                
+            # Check if workflow ID already exists
+            if workflow_id in self.workflows:
+                return {"error": f"Workflow ID '{workflow_id}' already exists"}
+                
+            try:
+                # Create and configure the workflow
+                workflow = self.workflow_factory.create_feature_workflow(feature_description)
+                
+                # Store the workflow
+                self.workflows[workflow_id] = workflow
+                
+                logger.info(f"Created feature implementation workflow '{workflow_id}' for: {feature_description}")
+                
+                return {
+                    "workflow_id": workflow_id,
+                    "name": workflow.name,
+                    "description": workflow.description,
+                    "feature_description": feature_description,
+                    "status": workflow.status,
+                    "created_at": workflow.created_at.isoformat()
+                }
+            except Exception as e:
+                logger.error(f"Failed to create feature workflow: {e}")
+                return {"error": f"Failed to create feature workflow: {str(e)}"}
+        
+        async def create_bugfix_workflow(bug_description: str, error_logs: Optional[str] = None, workflow_id: Optional[str] = None) -> Dict[str, Any]:
+            """
+            Create a workflow for fixing a bug.
+            
+            Args:
+                bug_description: Description of the bug to fix
+                error_logs: Optional error logs related to the bug
+                workflow_id: Optional ID for the workflow (generated if not provided)
+                
+            Returns:
+                Dict containing workflow metadata
+            """
+            # Generate workflow ID if not provided
+            if not workflow_id:
+                workflow_id = f"bugfix_{len(self.workflows) + 1}"
+                
+            # Check if workflow ID already exists
+            if workflow_id in self.workflows:
+                return {"error": f"Workflow ID '{workflow_id}' already exists"}
+                
+            try:
+                # Create and configure the workflow
+                workflow = self.workflow_factory.create_bugfix_workflow(bug_description, error_logs)
+                
+                # Store the workflow
+                self.workflows[workflow_id] = workflow
+                
+                logger.info(f"Created bug fix workflow '{workflow_id}' for: {bug_description}")
+                
+                return {
+                    "workflow_id": workflow_id,
+                    "name": workflow.name,
+                    "description": workflow.description,
+                    "bug_description": bug_description,
+                    "status": workflow.status,
+                    "created_at": workflow.created_at.isoformat()
+                }
+            except Exception as e:
+                logger.error(f"Failed to create bug fix workflow: {e}")
+                return {"error": f"Failed to create bug fix workflow: {str(e)}"}
+        
+        async def create_review_workflow(files_to_review: List[str], review_context: Optional[str] = None, workflow_id: Optional[str] = None) -> Dict[str, Any]:
+            """
+            Create a workflow for reviewing code.
+            
+            Args:
+                files_to_review: List of files to review
+                review_context: Optional context about the changes
+                workflow_id: Optional ID for the workflow (generated if not provided)
+                
+            Returns:
+                Dict containing workflow metadata
+            """
+            # Generate workflow ID if not provided
+            if not workflow_id:
+                workflow_id = f"review_{len(self.workflows) + 1}"
+                
+            # Check if workflow ID already exists
+            if workflow_id in self.workflows:
+                return {"error": f"Workflow ID '{workflow_id}' already exists"}
+                
+            try:
+                # Create and configure the workflow
+                workflow = self.workflow_factory.create_review_workflow(files_to_review, review_context)
+                
+                # Store the workflow
+                self.workflows[workflow_id] = workflow
+                
+                logger.info(f"Created code review workflow '{workflow_id}' for files: {', '.join(files_to_review)}")
+                
+                return {
+                    "workflow_id": workflow_id,
+                    "name": workflow.name,
+                    "description": workflow.description,
+                    "files_to_review": files_to_review,
+                    "status": workflow.status,
+                    "created_at": workflow.created_at.isoformat()
+                }
+            except Exception as e:
+                logger.error(f"Failed to create code review workflow: {e}")
+                return {"error": f"Failed to create code review workflow: {str(e)}"}
+        
+        async def execute_workflow(workflow_id: str) -> Dict[str, Any]:
+            """
+            Execute a workflow.
+            
+            Args:
+                workflow_id: ID of the workflow to execute
+                
+            Returns:
+                Dict containing execution results
+            """
+            if workflow_id not in self.workflows:
+                return {"error": f"Workflow '{workflow_id}' not found"}
+                
+            try:
+                # Get the workflow
+                workflow = self.workflows[workflow_id]
+                
+                # Execute the workflow
+                result = await workflow.execute()
+                
+                logger.info(f"Executed workflow '{workflow_id}' with status: {result['status']}")
+                
+                return result
+            except Exception as e:
+                logger.error(f"Failed to execute workflow '{workflow_id}': {e}")
+                return {
+                    "workflow_id": workflow_id,
+                    "error": f"Failed to execute workflow: {str(e)}",
+                    "status": "failed"
+                }
+        
+        async def get_workflow_status(workflow_id: str) -> Dict[str, Any]:
+            """
+            Get the status of a workflow.
+            
+            Args:
+                workflow_id: ID of the workflow
+                
+            Returns:
+                Dict containing workflow status
+            """
+            if workflow_id not in self.workflows:
+                return {"error": f"Workflow '{workflow_id}' not found"}
+                
+            try:
+                # Get the workflow
+                workflow = self.workflows[workflow_id]
+                
+                # Get the workflow status
+                status = workflow.get_status()
+                
+                return {
+                    "workflow_id": workflow_id,
+                    **status
+                }
+            except Exception as e:
+                logger.error(f"Failed to get status of workflow '{workflow_id}': {e}")
+                return {
+                    "workflow_id": workflow_id,
+                    "error": f"Failed to get workflow status: {str(e)}"
+                }
+        
+        async def list_workflows() -> Dict[str, Any]:
+            """
+            List all workflows.
+            
+            Returns:
+                Dict containing workflow information
+            """
+            try:
+                workflows_info = []
+                
+                for workflow_id, workflow in self.workflows.items():
+                    workflows_info.append({
+                        "workflow_id": workflow_id,
+                        "name": workflow.name,
+                        "description": workflow.description,
+                        "status": workflow.status,
+                        "created_at": workflow.created_at.isoformat(),
+                        "completed_at": workflow.completed_at.isoformat() if workflow.completed_at else None
+                    })
+                
+                return {
+                    "count": len(workflows_info),
+                    "workflows": workflows_info
+                }
+            except Exception as e:
+                logger.error(f"Failed to list workflows: {e}")
+                return {"error": f"Failed to list workflows: {str(e)}"}
+        
+        async def visualize_workflow(workflow_id: str) -> Dict[str, Any]:
+            """
+            Generate a visualization of a workflow.
+            
+            Args:
+                workflow_id: ID of the workflow
+                
+            Returns:
+                Dict containing visualization data
+            """
+            if workflow_id not in self.workflows:
+                return {"error": f"Workflow '{workflow_id}' not found"}
+                
+            try:
+                # Get the workflow
+                workflow = self.workflows[workflow_id]
+                
+                # Generate visualization
+                visualization = workflow.visualize()
+                
+                return {
+                    "workflow_id": workflow_id,
+                    "name": workflow.name,
+                    "description": workflow.description,
+                    "visualization": visualization
+                }
+            except Exception as e:
+                logger.error(f"Failed to visualize workflow '{workflow_id}': {e}")
+                return {
+                    "workflow_id": workflow_id,
+                    "error": f"Failed to visualize workflow: {str(e)}"
+                }
+        
+        async def create_knowledge_reasoning_workflow(reasoning_request: str, workflow_id: Optional[str] = None) -> Dict[str, Any]:
+            """
+            Create a knowledge reasoning workflow.
+            
+            This creates a workflow for structured reasoning using the knowledge graph,
+            which includes steps for context retrieval, structured reasoning, reflection,
+            and knowledge capture.
+            
+            Args:
+                reasoning_request: Description of the reasoning request or topic
+                workflow_id: Optional ID for the workflow (generated if not provided)
+                
+            Returns:
+                Dict containing workflow details or error information
+            """
+            # Generate workflow ID if not provided
+            if not workflow_id:
+                workflow_id = f"knowledge_reasoning_{str(uuid.uuid4())[:8]}"
+            
+            # Check if workflow ID already exists
+            if workflow_id in self.workflows:
+                return {"error": f"Workflow ID '{workflow_id}' already exists"}
+                
+            try:
+                # Create and configure the workflow
+                workflow = self.workflow_factory.create_knowledge_reasoning_workflow(reasoning_request)
+                
+                # Store the workflow
+                self.workflows[workflow_id] = workflow
+                
+                logger.info(f"Created knowledge reasoning workflow '{workflow_id}' for: {reasoning_request}")
+                
+                return {
+                    "workflow_id": workflow_id,
+                    "name": workflow.name,
+                    "description": workflow.description,
+                    "reasoning_request": reasoning_request,
+                    "status": workflow.status,
+                    "created_at": workflow.created_at.isoformat()
+                }
+            except Exception as e:
+                logger.error(f"Failed to create knowledge reasoning workflow: {e}")
+                return {"error": f"Failed to create knowledge reasoning workflow: {str(e)}"}
+        
+        # Register functions with the MCP server
+        functions = [
+            {
+                "name": "create_feature_workflow",
+                "description": "Create a workflow for implementing a feature",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "feature_description": {
+                            "type": "string",
+                            "description": "Description of the feature to implement"
+                        },
+                        "workflow_id": {
+                            "type": "string",
+                            "description": "Optional ID for the workflow"
+                        }
+                    },
+                    "required": ["feature_description"]
+                },
+                "function": create_feature_workflow
+            },
+            {
+                "name": "create_knowledge_reasoning_workflow",
+                "description": "Create a workflow for knowledge-based reasoning",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reasoning_request": {
+                            "type": "string",
+                            "description": "Description of the reasoning request or topic"
+                        },
+                        "workflow_id": {
+                            "type": "string",
+                            "description": "Optional ID for the workflow"
+                        }
+                    },
+                    "required": ["reasoning_request"]
+                },
+                "function": create_knowledge_reasoning_workflow
+            },
+            {
+                "name": "create_bugfix_workflow",
+                "description": "Create a workflow for fixing a bug",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "bug_description": {
+                            "type": "string",
+                            "description": "Description of the bug to fix"
+                        },
+                        "error_logs": {
+                            "type": "string",
+                            "description": "Optional error logs related to the bug"
+                        },
+                        "workflow_id": {
+                            "type": "string",
+                            "description": "Optional ID for the workflow"
+                        }
+                    },
+                    "required": ["bug_description"]
+                },
+                "function": create_bugfix_workflow
+            },
+            {
+                "name": "create_review_workflow",
+                "description": "Create a workflow for reviewing code",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "files_to_review": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "List of files to review"
+                        },
+                        "review_context": {
+                            "type": "string",
+                            "description": "Optional context about the changes"
+                        },
+                        "workflow_id": {
+                            "type": "string",
+                            "description": "Optional ID for the workflow"
+                        }
+                    },
+                    "required": ["files_to_review"]
+                },
+                "function": create_review_workflow
+            },
+            {
+                "name": "execute_workflow",
+                "description": "Execute a workflow",
+                "parameters": {
+                    "type": "string",
+                    "description": "ID of the workflow to execute"
+                },
+                "function": execute_workflow
+            },
+            {
+                "name": "get_workflow_status",
+                "description": "Get the status of a workflow",
+                "parameters": {
+                    "type": "string",
+                    "description": "ID of the workflow"
+                },
+                "function": get_workflow_status
+            },
+            {
+                "name": "list_workflows",
+                "description": "List all workflows",
+                "parameters": {},
+                "function": list_workflows
+            },
+            {
+                "name": "visualize_workflow",
+                "description": "Generate a visualization of a workflow",
+                "parameters": {
+                    "type": "string",
+                    "description": "ID of the workflow"
+                },
+                "function": visualize_workflow
+            }
+        ]
+        
+        # Register workflow management tools
+        self.mcp_server.register_tools(
+            tool_name="workflow-manager",
+            tool_description="Tools for creating and managing workflow templates for common development tasks",
+            functions=functions
+        )
+        
+        logger.info("Registered workflow management tools")
     
     def _register_dag_tools(self) -> None:
         """
@@ -521,4 +996,210 @@ class Orchestrator:
         """Shut down all components."""
         if self.file_watcher:
             self.file_watcher.stop()
-        logger.info("Orchestrator shutdown complete") 
+        logger.info("Orchestrator shutdown complete")
+
+    def register_tools(self):
+        """Register all tools with the MCP server."""
+        self._register_workflow_tools()
+        self._register_error_handling_tools()
+
+    def _register_error_handling_tools(self):
+        """
+        Register error handling tools with the MCP server.
+        
+        These tools provide error handling, recovery, and timeout
+        management capabilities for workflows.
+        """
+        if not self.mcp_server or not self.error_handler or not self.timeout_manager:
+            logger.warning("Cannot register error handling tools - required components not initialized")
+            return
+
+        # Register the handle_error tool
+        self.mcp_server.register_tool(
+            "handle_workflow_error",
+            {
+                "description": "Handle a workflow error with enhanced recovery mechanisms",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "error_message": {"type": "string", "description": "Error message"},
+                        "task_id": {"type": "string", "description": "ID of the task where the error occurred"},
+                        "workflow_id": {"type": "string", "description": "ID of the workflow"},
+                        "context": {"type": "object", "description": "Additional context about the error"},
+                        "retry_count": {"type": "integer", "description": "Number of retries already attempted"},
+                        "max_retries": {"type": "integer", "description": "Maximum number of retries allowed"}
+                    },
+                    "required": ["error_message", "task_id", "workflow_id"]
+                }
+            },
+            self._handle_workflow_error
+        )
+
+        # Register the get_error_summary tool
+        self.mcp_server.register_tool(
+            "get_workflow_error_summary",
+            {
+                "description": "Get a summary of all errors that occurred during workflow execution",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string", "description": "ID of the workflow (optional)"}
+                    }
+                }
+            },
+            self._get_workflow_error_summary
+        )
+
+        # Register timeout management tools
+        self.mcp_server.register_tool(
+            "update_task_timeout",
+            {
+                "description": "Update the timeout for a task",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string", "description": "ID of the task"},
+                        "timeout": {"type": "number", "description": "New timeout in seconds"}
+                    },
+                    "required": ["task_id", "timeout"]
+                }
+            },
+            self._update_task_timeout
+        )
+
+        # Register the adapt_timeout tool
+        self.mcp_server.register_tool(
+            "adapt_task_timeout",
+            {
+                "description": "Adapt the timeout for a task based on execution history",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string", "description": "ID of the task"}
+                    },
+                    "required": ["task_id"]
+                }
+            },
+            self._adapt_task_timeout
+        )
+
+        logger.info("Error handling tools registered successfully")
+
+    def _handle_workflow_error(self, error_message, task_id, workflow_id, context=None, retry_count=0, max_retries=3):
+        """
+        Handle a workflow error.
+        
+        Args:
+            error_message: Error message
+            task_id: ID of the task where the error occurred
+            workflow_id: ID of the workflow
+            context: Additional context about the error
+            retry_count: Number of retries already attempted
+            max_retries: Maximum number of retries allowed
+            
+        Returns:
+            Dict containing recovery information
+        """
+        if not self.error_handler:
+            return {"error": "Error handler not initialized"}
+        
+        # Create an exception from the error message
+        error = Exception(error_message)
+        
+        # Add workflow_id to context
+        context = context or {}
+        context["workflow_id"] = workflow_id
+        
+        # Handle the error
+        can_continue, recovery_info = self.error_handler.handle_error(
+            error=error,
+            task_id=task_id,
+            context=context,
+            retry_count=retry_count,
+            max_retries=max_retries
+        )
+        
+        # Add whether the workflow can continue
+        recovery_info["can_continue"] = can_continue
+        
+        # If we need to increase timeout, do it
+        if recovery_info.get("action") == "retry" and recovery_info.get("increase_timeout"):
+            multiplier = recovery_info.get("timeout_multiplier", 1.5)
+            new_timeout = self.timeout_manager.increase_timeout(task_id, multiplier)
+            recovery_info["new_timeout"] = new_timeout
+        
+        return recovery_info
+
+    def _get_workflow_error_summary(self, workflow_id=None):
+        """
+        Get a summary of all errors that occurred during workflow execution.
+        
+        Args:
+            workflow_id: ID of the workflow (optional)
+            
+        Returns:
+            Dict containing error summary information
+        """
+        if not self.error_handler:
+            return {"error": "Error handler not initialized"}
+        
+        # Get error summary
+        summary = self.error_handler.get_error_summary()
+        
+        # Filter by workflow_id if provided
+        if workflow_id:
+            filtered_task_errors = {}
+            for task_id, errors in summary.get("task_errors", {}).items():
+                filtered_errors = [
+                    error for error in errors 
+                    if error.get("context", {}).get("workflow_id") == workflow_id
+                ]
+                if filtered_errors:
+                    filtered_task_errors[task_id] = filtered_errors
+            
+            summary["task_errors"] = filtered_task_errors
+            summary["total_filtered_errors"] = sum(len(errors) for errors in filtered_task_errors.values())
+        
+        return summary
+
+    def _update_task_timeout(self, task_id, timeout):
+        """
+        Update the timeout for a task.
+        
+        Args:
+            task_id: ID of the task
+            timeout: New timeout in seconds
+            
+        Returns:
+            Dict containing the new timeout
+        """
+        if not self.timeout_manager:
+            return {"error": "Timeout manager not initialized"}
+        
+        self.timeout_manager.update_timeout(task_id, timeout)
+        
+        return {
+            "task_id": task_id,
+            "timeout": timeout
+        }
+
+    def _adapt_task_timeout(self, task_id):
+        """
+        Adapt the timeout for a task based on execution history.
+        
+        Args:
+            task_id: ID of the task
+            
+        Returns:
+            Dict containing the adapted timeout
+        """
+        if not self.timeout_manager:
+            return {"error": "Timeout manager not initialized"}
+        
+        timeout = self.timeout_manager.adapt_timeout(task_id)
+        
+        return {
+            "task_id": task_id,
+            "timeout": timeout,
+            "stats": self.timeout_manager.get_timeout_stats().get(task_id, {})
+        } 
