@@ -1,0 +1,40 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+
+**Remember the plan**
+   - read the plan [kg-think-mcp.md](mdc:kg-think-mcp.md) , and add important updates to the file as we move though the implimentation phases. 
+
+
+**Utilize your MCP Tools:**
+    - Always Use the MCP tool `exa_search` for web searches.
+    - When we research commit findings with memory tools 
+    - You have memory tools such as:
+      - `create_entities`
+      - `create_relations`
+      - `add_observations`
+      - `delete_entities`
+      - `delete_observations`
+      - `delete_relations`
+      - `read_graph`
+      - `search_nodes`
+      - `open_nodes`
+      - `update_entities`
+      - `update_relations`
+
+   - Always use the "think" tool in chat for better reasoning. Use it after any context change (e.g., viewing new files, running commands, or receiving tool outputs), call the MCP "think" tool to organize your reasoning before responding.
+    - Specifically, always use the "think" tool:
+      - After examining file contents or project structure.
+      - After running terminal commands or analyzing their outputs.
+      - After receiving search results or API responses.
+      - Before making code suggestions or explaining complex concepts.
+      - When transitioning between different parts of a task.
+    - When using the "think" tool:
+      - List the specific rules or constraints that apply to the current task.
+      - Check if all required information is collected.
+      - Verify that your planned approach is correct.
+      - Break down complex problems into clearly defined steps.
+      - Analyze outputs from other tools thoroughly.
+      - Plan multi-step approaches before executing them.
