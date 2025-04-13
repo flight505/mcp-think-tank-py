@@ -199,22 +199,22 @@ mcp-think-tank-nextgen/
 
 ## Phase 5: File System Awareness & Codebase Integration
 
-- [ ] **File Watchers** (Fully Integrated, Not Optional)
-- [ ] Implement `file_watcher.py` that:
+- [x] **File Watchers** (Fully Integrated, Not Optional)
+- [x] Implement `file_watcher.py` that:
   - Recursively indexes `.py`, `.md`, `.js`, etc. in the user's codebase (based on an env variable like `PROJECT_PATH`).
   - Maintains a map of file → summary or key definitions (classes, functions).
   - On changes, re-index and update a "File" or "Code" entity in the knowledge graph with relevant observations.
 
-- [ ] **Search Code / Summarize Code Tools**
-- [ ] Add `search_code(query: str) -> str`:
+- [x] **Search Code / Summarize Code Tools**
+- [x] Add `search_code(query: str) -> str`:
   - Internally queries the watchers' index. Optionally combine it with the semantic search approach if we embed code or docstrings.
   - Returns snippet references and line numbers for relevant matches.
-- [ ] Add `summarize_file(filepath: str) -> str`:
+- [x] Add `summarize_file(filepath: str) -> str`:
   - Possibly calls an LLM to produce a summarized overview of the code or doc text.
   - Stores that summary in the knowledge graph for future reference.
 
-- [ ] **Auto-Context Injection from Code to Memory**
-- [ ] Whenever user or Claude references a function or file, orchestrator checks watchers' index:
+- [x] **Auto-Context Injection from Code to Memory**
+- [x] Whenever user or Claude references a function or file, orchestrator checks watchers' index:
   - If relevant, inject a snippet or summary into the conversation.
   - Allow the user to `think` on it or store an observation in memory.
 

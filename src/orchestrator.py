@@ -5,683 +5,520 @@ Manages cross-tool intelligence and coordination
 """
 import logging
 import asyncio
-from typing import Dict, List, Optional, Any
+import inspect
+import json
+import os
+from typing import Dict, List, Optional, Any, Callable
+from datetime import datetime
 
 from fastmcp import FastMCP
+from fastapi import FastAPI
+from fastmcp.server import MCPServer, WebsocketManager
 
 # Local imports
 from .config import get_config
-from .tools.memory import KnowledgeGraph
+from .tools.memory import KnowledgeGraph, MemoryTool
 from .tools.think import ThinkTool
-from .tools.tasks import TaskManager, download_local_model
+from .tools.tasks import TaskManager, download_local_model, TasksTool
 from .watchers.file_watcher import FileWatcher
 from .tools.code_tools import CodeTools
+from .tools.dag_orchestrator import DAGExecutor, EmbeddingCache
 
 logger = logging.getLogger("mcp-think-tank.orchestrator")
 
 class Orchestrator:
     """
-    Orchestrates interactions between different tools and components
+    Orchestrates the various components of the system.
     
-    The orchestrator ensures tools can communicate with each other
-    and coordinates complex multi-step operations
+    This class is responsible for initializing and managing all the tools
+    and services used by the system, including the FastMCP server and
+    various tool instances.
     """
     
-    def __init__(self, mcp: FastMCP):
-        """Initialize the orchestrator with an MCP server"""
-        self.mcp = mcp
-        self.tools = {}
-        logger.info("Orchestrator initialized")
-        
-        # Load configuration
-        self.config = get_config()
-        
-        # Initialize component references
-        self.kg = None  # Knowledge Graph
-        self.think_tool = None  # Think Tool
-        self.task_manager = None  # Task Manager
-        self.file_watcher = None  # File Watcher
-        self.code_tools = None  # Code Tools
-        
-        # Initialize knowledge graph
-        self._init_knowledge_graph()
-        
-        # Initialize think tool
-        self._init_think_tool()
-        
-        # Initialize task manager
-        self._init_task_manager()
-        
-        # Initialize file watcher
-        self._init_file_watcher()
-        
-        # Initialize code tools
-        self._init_code_tools()
-    
-    def _init_knowledge_graph(self):
-        """Initialize the knowledge graph component"""
-        try:
-            self.kg = KnowledgeGraph(
-                memory_file_path=self.config.memory_file_path,
-                use_embeddings=self.config.use_embeddings
-            )
-            logger.info("Knowledge graph initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize knowledge graph: {e}")
-            # Create a fallback in-memory knowledge graph
-            self.kg = KnowledgeGraph(
-                memory_file_path=self.config.memory_file_path,
-                use_embeddings=False
-            )
-            logger.warning("Using fallback in-memory knowledge graph without embeddings")
-    
-    def _init_think_tool(self):
-        """Initialize the think tool component"""
-        try:
-            # The sample_func will be implemented later with Anthropic API
-            self.think_tool = ThinkTool(knowledge_graph=self.kg, sample_func=None)
-            logger.info("Think tool initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize think tool: {e}")
-            # Create a basic think tool without advanced features
-            self.think_tool = ThinkTool(knowledge_graph=self.kg)
-            logger.warning("Using basic think tool without reflection capabilities")
-    
-    def _init_task_manager(self):
-        """Initialize the task manager component"""
-        try:
-            # Get Anthropic API key from config
-            anthropic_api_key = getattr(self.config, "anthropic_api_key", None)
-            
-            # Initialize task manager with knowledge graph and API key
-            self.task_manager = TaskManager(
-                knowledge_graph=self.kg,
-                anthropic_api_key=anthropic_api_key
-            )
-            logger.info("Task manager initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize task manager: {e}")
-            # Create a basic task manager without LLM capabilities
-            self.task_manager = TaskManager(knowledge_graph=self.kg)
-            logger.warning("Using basic task manager without advanced parsing capabilities")
-    
-    def _init_file_watcher(self):
-        """Initialize the file watcher component"""
-        try:
-            # Get file watcher config
-            project_path = getattr(self.config, "project_path", ".")
-            file_patterns = getattr(self.config, "file_patterns", ["*.py", "*.js", "*.ts", "*.jsx", "*.tsx"])
-            exclude_patterns = getattr(self.config, "exclude_patterns", ["**/node_modules/**", "**/.git/**", "**/venv/**"])
-            polling_interval = getattr(self.config, "polling_interval", 10)
-            
-            # Initialize file watcher
-            self.file_watcher = FileWatcher(
-                project_path=project_path,
-                knowledge_graph=self.kg,
-                file_patterns=file_patterns,
-                exclude_patterns=exclude_patterns,
-                polling_interval=polling_interval
-            )
-            logger.info("File watcher initialized successfully")
-            
-            # Start file watcher in background
-            self.file_watcher.start()
-        except Exception as e:
-            logger.error(f"Failed to initialize file watcher: {e}")
-            # Create a basic file watcher without file watching capabilities
-            self.file_watcher = FileWatcher(
-                project_path=".",
-                knowledge_graph=self.kg,
-                start_watching=False
-            )
-            logger.warning("Using basic file watcher without file watching capabilities")
-    
-    def _init_code_tools(self):
-        """Initialize the code tools component"""
-        try:
-            if not self.file_watcher:
-                raise ValueError("File watcher not initialized")
-                
-            # Initialize code tools
-            self.code_tools = CodeTools(file_watcher=self.file_watcher)
-            logger.info("Code tools initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize code tools: {e}")
-            logger.warning("Code tools not available")
-    
-    def register_tools(self) -> None:
-        """Register all tools and resources with the MCP server"""
-        logger.info("Registering tools with MCP server")
-        
-        # Initialize and register tools
-        self._register_memory_tools()
-        self._register_think_tools()
-        self._register_task_tools()
-        self._register_file_tools()
-        self._register_orchestrator_workflows()
-        
-        logger.info(f"Registered {len(self.tools)} tools with MCP server")
-    
-    def _register_memory_tools(self) -> None:
-        """Register knowledge graph and memory tools"""
-        logger.info("Registering memory tools")
-        
-        # Create entities
-        @self.mcp.tool()
-        def create_entities(entities: List[Dict[str, Any]]) -> Dict[str, Any]:
-            """
-            Create multiple new entities in the knowledge graph
-            
-            Args:
-                entities: Array of entities to create with name, entityType, and observations
-                
-            Returns:
-                Dict with created and existing entity names
-            """
-            result = self.kg.create_entities(entities)
-            self.tools["create_entities"] = "memory"
-            return result
-        
-        # Create relations
-        @self.mcp.tool()
-        def create_relations(relations: List[Dict[str, Any]]) -> Dict[str, Any]:
-            """
-            Create multiple new relations between entities in the knowledge graph
-            
-            Args:
-                relations: Array of relations to create with from, to, and relationType
-                
-            Returns:
-                Dict with created and failed relations
-            """
-            result = self.kg.create_relations(relations)
-            self.tools["create_relations"] = "memory"
-            return result
-        
-        # Add observations
-        @self.mcp.tool()
-        def add_observations(observations: List[Dict[str, Any]]) -> Dict[str, Any]:
-            """
-            Add new observations to existing entities in the knowledge graph
-            
-            Args:
-                observations: Array of entity observations to add with entityName and contents
-                
-            Returns:
-                Dict with updated and not_found entity names
-            """
-            result = self.kg.add_observations(observations)
-            self.tools["add_observations"] = "memory"
-            return result
-        
-        # Delete entities
-        @self.mcp.tool()
-        def delete_entities(entityNames: List[str]) -> Dict[str, Any]:
-            """
-            Delete multiple entities and their associated relations from the knowledge graph
-            
-            Args:
-                entityNames: Array of entity names to delete
-                
-            Returns:
-                Dict with deleted and not_found entity names
-            """
-            result = self.kg.delete_entities(entityNames)
-            self.tools["delete_entities"] = "memory"
-            return result
-        
-        # Delete observations
-        @self.mcp.tool()
-        def delete_observations(deletions: List[Dict[str, Any]]) -> Dict[str, Any]:
-            """
-            Delete specific observations from entities in the knowledge graph
-            
-            Args:
-                deletions: Array of entity observations to delete with entityName and observations
-                
-            Returns:
-                Dict with updated and not_found entity names
-            """
-            result = self.kg.delete_observations(deletions)
-            self.tools["delete_observations"] = "memory"
-            return result
-        
-        # Delete relations
-        @self.mcp.tool()
-        def delete_relations(relations: List[Dict[str, Any]]) -> Dict[str, Any]:
-            """
-            Delete multiple relations from the knowledge graph
-            
-            Args:
-                relations: Array of relations to delete with from, to, and relationType
-                
-            Returns:
-                Dict with deleted and not_found relations
-            """
-            result = self.kg.delete_relations(relations)
-            self.tools["delete_relations"] = "memory"
-            return result
-        
-        # Read entire graph
-        @self.mcp.tool()
-        def read_graph(dummy: str = "") -> Dict[str, Any]:
-            """
-            Read the entire knowledge graph
-            
-            Returns:
-                Dict with entities and relations
-            """
-            result = self.kg.read_graph()
-            self.tools["read_graph"] = "memory"
-            return result
-        
-        # Search nodes
-        @self.mcp.tool()
-        def search_nodes(query: str) -> List[Dict[str, Any]]:
-            """
-            Search for nodes in the knowledge graph based on a query
-            
-            Args:
-                query: Search query to find matching entities
-                
-            Returns:
-                List of matching entities
-            """
-            result = self.kg.search_nodes(query)
-            self.tools["search_nodes"] = "memory"
-            return result
-        
-        # Open nodes
-        @self.mcp.tool()
-        def open_nodes(names: List[str]) -> List[Dict[str, Any]]:
-            """
-            Open specific nodes in the knowledge graph by their names
-            
-            Args:
-                names: Array of entity names to retrieve
-                
-            Returns:
-                List of entity data
-            """
-            result = self.kg.open_nodes(names)
-            self.tools["open_nodes"] = "memory"
-            return result
-        
-        # Update entities
-        @self.mcp.tool()
-        def update_entities(entities: List[Dict[str, Any]]) -> Dict[str, Any]:
-            """
-            Update multiple existing entities in the knowledge graph
-            
-            Args:
-                entities: Array of entities to update with name and optional entityType/observations
-                
-            Returns:
-                Dict with updated and not_found entity names
-            """
-            result = self.kg.update_entities(entities)
-            self.tools["update_entities"] = "memory"
-            return result
-        
-        # Update relations is not needed since we can delete and recreate them
-    
-    def _register_think_tools(self) -> None:
-        """Register thinking and reasoning tools"""
-        logger.info("Registering think tools")
-        
-        if not self.think_tool:
-            logger.warning("Think tool not initialized, skipping registration")
-            return
-        
-        @self.mcp.tool()
-        def think(structuredReasoning: str, 
-                 storeInMemory: bool = False, 
-                 category: Optional[str] = None,
-                 tags: Optional[List[str]] = None,
-                 associateWithEntity: Optional[str] = None) -> Dict[str, Any]:
-            """
-            Use the tool to think about something. 
-            
-            It will not obtain new information or change the database, but just append the thought to the log.
-            Use it when complex reasoning or some cache memory is needed.
-            
-            For best results, structure your reasoning with:
-            1) Problem definition
-            2) Relevant facts/context
-            3) Analysis steps
-            4) Conclusion/decision
-            
-            Args:
-                structuredReasoning: A structured thought process to work through complex problems
-                storeInMemory: Whether to store this thought in the knowledge graph
-                category: Optional category for the thought (e.g., "problem-solving", "analysis", "planning")
-                tags: Optional tags to help categorize and find this thought later
-                associateWithEntity: Optional entity name to associate this thought with
-                
-            Returns:
-                Dictionary with the processed thought and additional information
-            """
-            result = self.think_tool.process(
-                structured_reasoning=structuredReasoning,
-                store_in_memory=storeInMemory,
-                reflexion=self.config.enable_reflexion,
-                category=category,
-                tags=tags,
-                associate_with_entity=associateWithEntity
-            )
-            self.tools["think"] = "think"
-            return result
-    
-    def _register_task_tools(self) -> None:
-        """Register task management tools"""
-        logger.info("Registering task management tools")
-        
-        if not self.task_manager:
-            logger.warning("Task manager not initialized, skipping registration")
-            return
-        
-        @self.mcp.tool()
-        def create_task(title: str,
-                       description: str = "",
-                       priority: str = "medium",
-                       tags: Optional[List[str]] = None,
-                       dependencies: Optional[List[str]] = None,
-                       assigned_to: Optional[str] = None,
-                       parent_id: Optional[str] = None) -> Dict[str, Any]:
-            """
-            Create a new task
-            
-            Args:
-                title: Task title
-                description: Task description
-                priority: Task priority (low, medium, high, critical)
-                tags: Optional list of tags
-                dependencies: Optional list of task IDs this task depends on
-                assigned_to: Optional assignee
-                parent_id: Optional parent task ID
-                
-            Returns:
-                Dict with the created task info
-            """
-            result = self.task_manager.create_task(
-                title=title,
-                description=description,
-                priority=priority,
-                tags=tags,
-                dependencies=dependencies,
-                assigned_to=assigned_to,
-                parent_id=parent_id
-            )
-            self.tools["create_task"] = "tasks"
-            return result
-        
-        @self.mcp.tool()
-        def list_tasks(status: Optional[str] = None,
-                      priority: Optional[str] = None,
-                      tags: Optional[List[str]] = None,
-                      assigned_to: Optional[str] = None) -> List[Dict[str, Any]]:
-            """
-            List tasks with optional filtering
-            
-            Args:
-                status: Optional status filter (todo, in_progress, blocked, done, cancelled)
-                priority: Optional priority filter (low, medium, high, critical)
-                tags: Optional tags filter (tasks must have at least one of these tags)
-                assigned_to: Optional assignee filter
-                
-            Returns:
-                List of matching tasks
-            """
-            result = self.task_manager.list_tasks(
-                status=status,
-                priority=priority,
-                tags=tags,
-                assigned_to=assigned_to
-            )
-            self.tools["list_tasks"] = "tasks"
-            return result
-        
-        @self.mcp.tool()
-        def update_task(task_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
-            """
-            Update an existing task
-            
-            Args:
-                task_id: ID of the task to update
-                updates: Dictionary of fields to update. Can include:
-                  - title: New task title
-                  - description: New task description
-                  - status: New status (todo, in_progress, blocked, done, cancelled)
-                  - priority: New priority (low, medium, high, critical)
-                  - tags: New list of tags
-                  - dependencies: New list of task IDs this task depends on
-                  - assigned_to: New assignee
-                  - parent_id: New parent task ID
-                
-            Returns:
-                Dict with updated task info or error
-            """
-            result = self.task_manager.update_task(
-                task_id=task_id,
-                updates=updates
-            )
-            self.tools["update_task"] = "tasks"
-            return result
-        
-        @self.mcp.tool()
-        def delete_task(task_id: str) -> Dict[str, Any]:
-            """
-            Delete a task
-            
-            Args:
-                task_id: ID of the task to delete
-                
-            Returns:
-                Dict with result of the deletion
-            """
-            result = self.task_manager.delete_task(task_id=task_id)
-            self.tools["delete_task"] = "tasks"
-            return result
-        
-        @self.mcp.tool()
-        async def parse_tasks_from_text(text: str) -> List[Dict[str, Any]]:
-            """
-            Parse tasks from a text description using an LLM
-            
-            This tool uses AI to extract structured tasks from natural language descriptions,
-            such as project requirements or meeting notes. It will attempt to use the 
-            Anthropic API if available, or fall back to a local LLM if needed.
-            
-            Args:
-                text: Text to parse into tasks
-                
-            Returns:
-                List of parsed tasks
-            """
-            result = await self.task_manager.parse_tasks_from_text(text=text)
-            self.tools["parse_tasks_from_text"] = "tasks"
-            return result
-    
-    def _register_file_tools(self) -> None:
-        """Register file system and code tools"""
-        logger.info("Registering file system and code tools")
-        
-        if not self.code_tools or not self.file_watcher:
-            logger.warning("Code tools or file watcher not initialized, skipping registration")
-            return
-        
-        # Register code tools
-        self.code_tools.register_tools(self.mcp)
-        self.tools["search_code"] = "code"
-        self.tools["summarize_file"] = "code"
-        
-        # Register file indexing tool
-        @self.mcp.tool()
-        def index_files(path: Optional[str] = None, 
-                        patterns: Optional[List[str]] = None) -> Dict[str, Any]:
-            """
-            Index files in a directory to add them to the knowledge graph
-            
-            Args:
-                path: Optional specific path to index (relative to project root)
-                patterns: Optional file patterns to match (e.g., ["*.py", "*.js"])
-                
-            Returns:
-                Dict with indexing results
-            """
-            try:
-                result = self.file_watcher.index_files(path=path, patterns=patterns)
-                self.tools["index_files"] = "files"
-                return result
-            except Exception as e:
-                logger.error(f"Error indexing files: {e}")
-                return {
-                    "error": f"Error indexing files: {str(e)}",
-                    "files_indexed": 0
-                }
-        
-        # Register file changes tool
-        @self.mcp.tool()
-        def get_file_changes() -> Dict[str, Any]:
-            """
-            Get recent file changes detected by the file watcher
-            
-            Returns:
-                Dict with recent file changes
-            """
-            try:
-                result = self.file_watcher.get_recent_changes()
-                self.tools["get_file_changes"] = "files"
-                return result
-            except Exception as e:
-                logger.error(f"Error getting file changes: {e}")
-                return {
-                    "error": f"Error getting file changes: {str(e)}",
-                    "changes": []
-                }
-        
-        # Register auto-context injection tool
-        @self.mcp.tool()
-        def get_context_for_tool(queries: List[str], 
-                                max_results: int = 3) -> Dict[str, Any]:
-            """
-            Get context from the codebase based on queries for auto-context injection
-            
-            Args:
-                queries: List of search queries
-                max_results: Maximum number of results to return per query
-                
-            Returns:
-                Dictionary with context information
-            """
-            try:
-                result = self.code_tools.get_context_for_tool(
-                    queries=queries,
-                    max_results=max_results
-                )
-                self.tools["get_context_for_tool"] = "code"
-                return result
-            except Exception as e:
-                logger.error(f"Error getting context: {e}")
-                return {
-                    "error": f"Error getting context: {str(e)}",
-                    "context_blocks": [],
-                    "total_items": 0
-                }
-    
-    def _register_orchestrator_workflows(self) -> None:
-        """Register orchestrated workflows that combine multiple tools"""
-        logger.info("Registering orchestrator workflows")
-        
-        @self.mcp.tool()
-        async def auto_plan_workflow(text: str) -> Dict[str, Any]:
-            """
-            Automatically plan a workflow from text requirements
-            
-            This tool combines multiple steps:
-            1. Parse text into tasks using LLM
-            2. Create tasks in the system
-            3. Reflect on the tasks for completeness
-            4. Store the finalized tasks in memory
-            
-            Args:
-                text: Text describing the requirements or project
-                
-            Returns:
-                Dict with workflow results including created tasks
-            """
-            logger.info("Starting auto plan workflow")
-            
-            # Parse tasks
-            tasks = []
-            if self.task_manager:
-                try:
-                    # Use the async parse_tasks_from_text method
-                    tasks = await self.task_manager.parse_tasks_from_text(text)
-                    logger.info(f"Created {len(tasks)} tasks from requirements")
-                except Exception as e:
-                    logger.error(f"Error parsing tasks: {e}")
-            
-            # Reflect on tasks using the think tool if available
-            reflection = None
-            if self.think_tool and tasks:
-                try:
-                    # Format tasks for reflection
-                    tasks_text = "\n".join([
-                        f"Task {i+1}: {task.get('title')} - {task.get('description', 'No description')}"
-                        for i, task in enumerate(tasks)
-                    ])
-                    
-                    reflection_prompt = f"Review these tasks extracted from requirements and assess if they are complete and well-structured:\n\n{tasks_text}"
-                    
-                    reflection = self.think_tool.process(
-                        structured_reasoning=reflection_prompt,
-                        store_in_memory=True,
-                        category="task_planning",
-                        tags=["auto_plan", "task_review"]
-                    )
-                    logger.info("Generated reflection on tasks")
-                except Exception as e:
-                    logger.error(f"Error reflecting on tasks: {e}")
-            
-            # Return the workflow results
-            self.tools["auto_plan_workflow"] = "orchestrator"
-            return {
-                "workflow": "auto_plan",
-                "tasks_created": len(tasks),
-                "tasks": tasks,
-                "reflection": reflection
-            }
-
-    def auto_retrieve_memory(self, query: str, limit: int = 3) -> List[Dict[str, Any]]:
+    def __init__(self, app: FastAPI, websocket_manager: WebsocketManager):
         """
-        Automatically retrieve relevant memory entries based on a query
+        Initialize the orchestrator.
         
         Args:
-            query: The search query
-            limit: Maximum number of results to return
+            app: The FastAPI application instance
+            websocket_manager: The WebsocketManager for real-time communication
+        """
+        self.app = app
+        self.websocket_manager = websocket_manager
+        self.mcp_server = MCPServer(app, websocket_manager)
+        
+        # Initialize tools
+        self.memory_tool = self._init_memory_tool()
+        self.think_tool = self._init_think_tool()
+        self.tasks_tool = self._init_tasks_tool()
+        
+        # Initialize file watcher first, then code tools
+        self.file_watcher = self._init_file_watcher()
+        self.code_tools = self._init_code_tools()
+        
+        self.dag_executor = self._init_dag_executor()
+        self.embedding_cache = self._init_embedding_cache()
+        
+        # Register all tools with the MCP server
+        self._register_memory_tools()
+        self._register_think_tools()
+        self._register_tasks_tools()
+        self._register_code_tools()
+        self._register_dag_tools()
+
+    def _init_memory_tool(self) -> MemoryTool:
+        """Initialize the memory tool."""
+        try:
+            return MemoryTool()
+        except Exception as e:
+            logger.error(f"Failed to initialize memory tool: {e}")
+            # Return a basic version or raise an exception
+            return MemoryTool(use_basic=True)
+    
+    def _init_think_tool(self) -> ThinkTool:
+        """Initialize the think tool."""
+        try:
+            return ThinkTool()
+        except Exception as e:
+            logger.error(f"Failed to initialize think tool: {e}")
+            # Return a basic version or raise an exception
+            return ThinkTool(use_basic=True)
+    
+    def _init_tasks_tool(self) -> TasksTool:
+        """Initialize the tasks tool."""
+        try:
+            return TasksTool()
+        except Exception as e:
+            logger.error(f"Failed to initialize tasks tool: {e}")
+            # Return a basic version or raise an exception
+            return TasksTool(use_basic=True)
+    
+    def _init_code_tools(self) -> CodeTools:
+        """Initialize the code tools.
+        
+        This requires the file_watcher to be initialized first.
+        """
+        try:
+            if not self.file_watcher:
+                logger.warning("File watcher not initialized, creating basic code tools")
+                # Initialize with a new file watcher if needed
+                project_path = os.getenv("PROJECT_PATH", os.getcwd())
+                file_watcher = FileWatcher(
+                    project_path=project_path,
+                    knowledge_graph=self.memory_tool.knowledge_graph,
+                    start_watching=False
+                )
+                return CodeTools(file_watcher)
+            
+            return CodeTools(self.file_watcher)
+        except Exception as e:
+            logger.error(f"Failed to initialize code tools: {e}")
+            # Return a basic version or create a minimal implementation
+            project_path = os.getenv("PROJECT_PATH", os.getcwd())
+            try:
+                file_watcher = FileWatcher(
+                    project_path=project_path,
+                    knowledge_graph=self.memory_tool.knowledge_graph,
+                    start_watching=False
+                )
+                return CodeTools(file_watcher)
+            except:
+                # Last resort, create a minimal implementation
+                logger.error("Failed to create even basic code tools, functionality will be limited")
+                return None
+    
+    def _init_dag_executor(self) -> DAGExecutor:
+        """Initialize the DAG executor."""
+        try:
+            return DAGExecutor(
+                max_concurrency=10,
+                global_timeout=None,
+                fail_fast=False,
+                metrics_enabled=True
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize DAG executor: {e}")
+            # Return a basic version
+            return DAGExecutor(max_concurrency=5, metrics_enabled=False)
+    
+    def _init_embedding_cache(self) -> EmbeddingCache:
+        """Initialize the embedding cache."""
+        try:
+            return EmbeddingCache(max_size=1000)
+        except Exception as e:
+            logger.error(f"Failed to initialize embedding cache: {e}")
+            # Return a basic version
+            return EmbeddingCache(max_size=100)
+    
+    def _init_file_watcher(self) -> FileWatcher:
+        """Initialize the file watcher."""
+        try:
+            # Get project path from environment or use default
+            project_path = os.getenv("PROJECT_PATH", os.getcwd())
+            
+            # Initialize with proper configuration
+            file_watcher = FileWatcher(
+                project_path=project_path,
+                knowledge_graph=self.memory_tool.knowledge_graph,
+                file_patterns=["*.py", "*.md", "*.js", "*.ts", "*.html", "*.css"],
+                exclude_patterns=["__pycache__/*", "*.pyc", "node_modules/*", ".git/*"],
+                polling_interval=5.0
+            )
+            
+            # Start the file watcher in the background
+            file_watcher.start()
+            return file_watcher
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize file watcher: {e}")
+            return None
+    
+    def _register_memory_tools(self) -> None:
+        """Register memory-related tools with the MCP server."""
+        self.mcp_server.register_tools(
+            tool_name="think-tool",
+            tool_description="Knowledge graph management tools",
+            functions={
+                "create_entities": self.memory_tool.create_entities,
+                "create_relations": self.memory_tool.create_relations,
+                "add_observations": self.memory_tool.add_observations,
+                "delete_entities": self.memory_tool.delete_entities,
+                "delete_observations": self.memory_tool.delete_observations,
+                "delete_relations": self.memory_tool.delete_relations,
+                "read_graph": self.memory_tool.read_graph,
+                "search_nodes": self.memory_tool.search_nodes,
+                "open_nodes": self.memory_tool.open_nodes,
+                "update_entities": self.memory_tool.update_entities,
+                "update_relations": self.memory_tool.update_relations,
+            }
+        )
+    
+    def _register_think_tools(self) -> None:
+        """Register think tools with the MCP server."""
+        self.mcp_server.register_tools(
+            tool_name="think-tool",
+            tool_description="Thinking and reasoning tools",
+            functions={
+                "think": {
+                    "function": self.think_tool.think,
+                    "description": "Use the tool to think about something. It will not obtain new information or change the database, but just append the thought to the log. Use it when complex reasoning or some cache memory is needed. For best results, structure your reasoning with: 1) Problem definition, 2) Relevant facts/context, 3) Analysis steps, 4) Conclusion/decision.",
+                    "parameters": {
+                        "structuredReasoning": {
+                            "type": "string",
+                            "description": "A structured thought process to work through complex problems. Use this as a dedicated space for reasoning step-by-step.",
+                            "required": True,
+                            "minLength": 10
+                        },
+                        "category": {
+                            "type": "string",
+                            "description": "Optional category for the thought (e.g., \"problem-solving\", \"analysis\", \"planning\")",
+                            "required": False
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional tags to help categorize and find this thought later",
+                            "required": False
+                        },
+                        "associateWithEntity": {
+                            "type": "string",
+                            "description": "Optional entity name to associate this thought with",
+                            "required": False
+                        },
+                        "storeInMemory": {
+                            "type": "boolean",
+                            "description": "Whether to store this thought in the knowledge graph memory",
+                            "required": False,
+                            "default": False
+                        }
+                    }
+                }
+            }
+        )
+    
+    def _register_tasks_tools(self) -> None:
+        """Register task management tools with the MCP server."""
+        self.mcp_server.register_tools(
+            tool_name="mcp-taskmanager",
+            tool_description="Task management tools",
+            functions={
+                "request_planning": self.tasks_tool.request_planning,
+                "get_next_task": self.tasks_tool.get_next_task,
+                "mark_task_done": self.tasks_tool.mark_task_done,
+                "approve_task_completion": self.tasks_tool.approve_task_completion,
+                "approve_request_completion": self.tasks_tool.approve_request_completion,
+                "open_task_details": self.tasks_tool.open_task_details,
+                "list_requests": self.tasks_tool.list_requests,
+                "add_tasks_to_request": self.tasks_tool.add_tasks_to_request,
+                "update_task": self.tasks_tool.update_task,
+                "delete_task": self.tasks_tool.delete_task
+            }
+        )
+    
+    def _register_code_tools(self) -> None:
+        """Register code analysis and manipulation tools with the MCP server."""
+        if not self.code_tools:
+            logger.warning("Code tools not initialized, skipping tool registration")
+            return
+            
+        self.mcp_server.register_tools(
+            tool_name="code-tool",
+            tool_description="Code analysis and manipulation tools",
+            functions={
+                "search_code": self.code_tools.search_code,
+                "summarize_file": self.code_tools.summarize_file
+            }
+        )
+    
+    def _register_dag_tools(self) -> None:
+        """
+        Register DAG orchestration tools with the MCP server.
+        
+        This method registers tools for creating and running directed acyclic
+        graphs (DAGs) of tasks, with support for dependency management,
+        parallel execution, timeout handling, and error recovery.
+        """
+        async def create_workflow(name: str, description: str = "") -> Dict[str, Any]:
+            """
+            Create a new workflow with the given name and description.
+            
+            Args:
+                name: Name of the workflow
+                description: Optional description of the workflow
+                
+            Returns:
+                Dict containing the workflow ID and other metadata
+            """
+            workflow_id = f"workflow_{len(self._workflows) + 1}"
+            self._workflows[workflow_id] = {
+                "id": workflow_id,
+                "name": name,
+                "description": description,
+                "dag_executor": DAGExecutor(
+                    max_concurrency=10,
+                    metrics_enabled=True
+                ),
+                "created_at": str(datetime.now()),
+                "status": "created"
+            }
+            return {"workflow_id": workflow_id, "name": name, "status": "created"}
+        
+        async def add_task_to_workflow(
+            workflow_id: str,
+            task_id: str,
+            tool_name: str,
+            function_name: str,
+            parameters: Dict[str, Any],
+            dependencies: List[str] = None,
+            timeout: Optional[float] = None,
+            retry_count: int = 0,
+            description: str = ""
+        ) -> Dict[str, Any]:
+            """
+            Add a task to a workflow.
+            
+            Args:
+                workflow_id: ID of the workflow to add the task to
+                task_id: ID for the task (must be unique within the workflow)
+                tool_name: Name of the tool to use (e.g., "memory-tool")
+                function_name: Name of the function to call (e.g., "create_entities")
+                parameters: Parameters to pass to the function
+                dependencies: List of task IDs that must complete before this task
+                timeout: Maximum execution time in seconds (None for no timeout)
+                retry_count: Number of retry attempts on failure
+                description: Human-readable description of the task
+                
+            Returns:
+                Dict containing task metadata
+            """
+            if workflow_id not in self._workflows:
+                return {"error": f"Workflow {workflow_id} not found"}
+            
+            workflow = self._workflows[workflow_id]
+            dag_executor = workflow["dag_executor"]
+            
+            # Get the function to call
+            tool_function = self._get_tool_function(tool_name, function_name)
+            if not tool_function:
+                return {"error": f"Function {function_name} not found in tool {tool_name}"}
+            
+            # Add the task to the DAG
+            dag_executor.add_task(
+                task_id=task_id,
+                func=tool_function,
+                kwargs=parameters,
+                dependencies=dependencies or [],
+                timeout=timeout,
+                retry_count=retry_count,
+                description=description
+            )
+            
+            return {
+                "workflow_id": workflow_id,
+                "task_id": task_id,
+                "status": "added",
+                "dependencies": dependencies or []
+            }
+        
+        async def execute_workflow(workflow_id: str) -> Dict[str, Any]:
+            """
+            Execute all tasks in a workflow.
+            
+            Args:
+                workflow_id: ID of the workflow to execute
+                
+            Returns:
+                Dict containing execution results and metrics
+            """
+            if workflow_id not in self._workflows:
+                return {"error": f"Workflow {workflow_id} not found"}
+            
+            workflow = self._workflows[workflow_id]
+            dag_executor = workflow["dag_executor"]
+            
+            # Update workflow status
+            workflow["status"] = "running"
+            
+            try:
+                # Execute the DAG
+                results = await dag_executor.execute()
+                
+                # Update workflow status
+                workflow["status"] = "completed"
+                workflow["completed_at"] = str(datetime.now())
+                
+                # Get execution summary
+                summary = dag_executor.get_execution_summary()
+                
+                return {
+                    "workflow_id": workflow_id,
+                    "status": "completed",
+                    "results": results,
+                    "summary": summary
+                }
+            except Exception as e:
+                # Update workflow status
+                workflow["status"] = "failed"
+                workflow["error"] = str(e)
+                
+                # Get execution summary
+                summary = dag_executor.get_execution_summary()
+                
+                return {
+                    "workflow_id": workflow_id,
+                    "status": "failed",
+                    "error": str(e),
+                    "summary": summary
+                }
+        
+        async def get_workflow_status(workflow_id: str) -> Dict[str, Any]:
+            """
+            Get the status of a workflow.
+            
+            Args:
+                workflow_id: ID of the workflow
+                
+            Returns:
+                Dict containing workflow status and metrics
+            """
+            if workflow_id not in self._workflows:
+                return {"error": f"Workflow {workflow_id} not found"}
+            
+            workflow = self._workflows[workflow_id]
+            dag_executor = workflow["dag_executor"]
+            
+            # Get execution summary
+            summary = dag_executor.get_execution_summary()
+            
+            return {
+                "workflow_id": workflow_id,
+                "name": workflow["name"],
+                "status": workflow["status"],
+                "created_at": workflow["created_at"],
+                "completed_at": workflow.get("completed_at"),
+                "summary": summary
+            }
+        
+        async def visualize_workflow(workflow_id: str) -> Dict[str, Any]:
+            """
+            Generate a visualization of a workflow.
+            
+            Args:
+                workflow_id: ID of the workflow
+                
+            Returns:
+                Dict containing visualization data
+            """
+            if workflow_id not in self._workflows:
+                return {"error": f"Workflow {workflow_id} not found"}
+            
+            workflow = self._workflows[workflow_id]
+            dag_executor = workflow["dag_executor"]
+            
+            # Get DAG visualization
+            visualization = dag_executor.visualize()
+            
+            return {
+                "workflow_id": workflow_id,
+                "name": workflow["name"],
+                "visualization": visualization
+            }
+        
+        # Initialize workflows dictionary
+        self._workflows = {}
+        
+        # Register DAG orchestration tools
+        self.mcp_server.register_tools(
+            tool_name="dag-orchestrator",
+            tool_description="Tools for orchestrating complex workflows with dependencies",
+            functions={
+                "create_workflow": create_workflow,
+                "add_task_to_workflow": add_task_to_workflow,
+                "execute_workflow": execute_workflow,
+                "get_workflow_status": get_workflow_status,
+                "visualize_workflow": visualize_workflow
+            }
+        )
+    
+    def _get_tool_function(self, tool_name: str, function_name: str) -> Optional[Callable]:
+        """
+        Get a tool function by name.
+        
+        Args:
+            tool_name: Name of the tool (e.g., "memory-tool")
+            function_name: Name of the function (e.g., "create_entities")
             
         Returns:
-            List of relevant memory entries
+            The function if found, None otherwise
         """
-        if not self.kg:
-            logger.warning("Knowledge graph not initialized, cannot retrieve memory")
-            return []
-            
-        try:
-            return self.kg.search_nodes(query, limit=limit)
-        except Exception as e:
-            logger.error(f"Error retrieving memory: {e}")
-            return []
-    
-    def cleanup(self) -> None:
-        """Clean up resources and stop background processes"""
-        logger.info("Cleaning up orchestrator resources")
+        # Map tool names to tool instances
+        tool_map = {
+            "think-tool": self.think_tool,
+            "memory-tool": self.memory_tool,
+            "mcp-taskmanager": self.tasks_tool,
+            "code-tool": self.code_tools
+        }
         
-        # Stop file watcher if running
+        if tool_name not in tool_map:
+            logger.warning(f"Tool {tool_name} not found")
+            return None
+        
+        tool = tool_map[tool_name]
+        
+        # Check if tool is None
+        if tool is None:
+            logger.warning(f"Tool {tool_name} is None")
+            return None
+        
+        # Get the function from the tool
+        if hasattr(tool, function_name):
+            return getattr(tool, function_name)
+        
+        logger.warning(f"Function {function_name} not found in tool {tool_name}")
+        return None
+    
+    def shutdown(self) -> None:
+        """Shut down all components."""
         if self.file_watcher:
-            try:
-                self.file_watcher.stop()
-                logger.info("File watcher stopped")
-            except Exception as e:
-                logger.error(f"Error stopping file watcher: {e}") 
+            self.file_watcher.stop()
+        logger.info("Orchestrator shutdown complete") 
