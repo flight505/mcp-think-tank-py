@@ -136,26 +136,26 @@ mcp-think-tank-nextgen/
 
 ## Phase 3: "Think" Tool – Structured Reasoning & Reflexion
 
-- [ ] **Core Think Functionality**
-- [ ] Implement `think(structured_reasoning: str, store_in_memory: bool = False, reflexion: bool = True) -> str`:
+- [x] **Core Think Functionality**
+- [x] Implement `think(structured_reasoning: str, store_in_memory: bool = False, reflexion: bool = True) -> str`:
   - Returns or logs the structured reasoning.
   - If `store_in_memory=True`, create an entity with type `Thought` and store the user's reasoning text (plus timestamp).
   - If `reflexion=True`, triggers a **reflection pass** (see below).
 
-- [ ] **Reflection & Self-Evaluation Pass**
-- [ ] Inside the think tool, after storing the user reasoning, optionally call a second step:
+- [x] **Reflection & Self-Evaluation Pass**
+- [x] Inside the think tool, after storing the user reasoning, optionally call a second step:
   - Provide the user's original reasoning plus a "self-check prompt" to see if any immediate corrections are needed.
   - Let the tool respond with a "Refined Thought" or confirm the original is correct.
   - Store that refined thought in memory as well if it's different from the original.
-- [ ] This enables advanced chain-of-thought refinement, pushing the frontier for multi-step self-correction.
+- [x] This enables advanced chain-of-thought refinement, pushing the frontier for multi-step self-correction.
 
-- [ ] **Context Injection from Memory**
-- [ ] If `query` or `topic` is given to `think`, automatically do a semantic search (`search_nodes(query)`) and inject the top 2–3 relevant memory items for the user's structured reasoning. 
-- [ ] Append a "context" block to the final output: "Context from Memory: ...".
-- [ ] This ensures the user's reasoning is well-informed by existing knowledge graph entries.
+- [x] **Context Injection from Memory**
+- [x] If `query` or `topic` is given to `think`, automatically do a semantic search (`search_nodes(query)`) and inject the top 2–3 relevant memory items for the user's structured reasoning. 
+- [x] Append a "context" block to the final output: "Context from Memory: ...".
+- [x] This ensures the user's reasoning is well-informed by existing knowledge graph entries.
 
-- [ ] **Interface/Docstrings**
-- [ ] Provide thorough docstrings so that LLMs (Claude) know exactly how to use the tool for reflection, with examples:
+- [x] **Interface/Docstrings**
+- [x] Provide thorough docstrings so that LLMs (Claude) know exactly how to use the tool for reflection, with examples:
   - "Call `think` before proceeding to the next action if you need to reflect on the user request or memory context."
 
 ---

@@ -11,6 +11,7 @@ from fastmcp import FastMCP
 # Local imports
 from .config import get_config
 from .tools.memory import KnowledgeGraph
+from .tools.think import ThinkTool
 
 logger = logging.getLogger("mcp-think-tank.orchestrator")
 
@@ -38,6 +39,9 @@ class Orchestrator:
         
         # Initialize knowledge graph
         self._init_knowledge_graph()
+        
+        # Initialize think tool
+        self._init_think_tool()
     
     def _init_knowledge_graph(self):
         """Initialize the knowledge graph component"""
@@ -55,6 +59,18 @@ class Orchestrator:
                 use_embeddings=False
             )
             logger.warning("Using fallback in-memory knowledge graph without embeddings")
+    
+    def _init_think_tool(self):
+        """Initialize the think tool component"""
+        try:
+            # The sample_func will be implemented later with Anthropic API
+            self.think_tool = ThinkTool(knowledge_graph=self.kg, sample_func=None)
+            logger.info("Think tool initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize think tool: {e}")
+            # Create a basic think tool without advanced features
+            self.think_tool = ThinkTool(knowledge_graph=self.kg)
+            logger.warning("Using basic think tool without reflection capabilities")
     
     def register_tools(self) -> None:
         """Register all tools and resources with the MCP server"""
@@ -233,9 +249,50 @@ class Orchestrator:
     
     def _register_think_tools(self) -> None:
         """Register thinking and reasoning tools"""
-        logger.info("Think tools registration placeholder")
+        logger.info("Registering think tools")
         
-        # Will implement in future steps
+        if not self.think_tool:
+            logger.warning("Think tool not initialized, skipping registration")
+            return
+        
+        @self.mcp.tool()
+        def think(structuredReasoning: str, 
+                 storeInMemory: bool = False, 
+                 category: Optional[str] = None,
+                 tags: Optional[List[str]] = None,
+                 associateWithEntity: Optional[str] = None) -> Dict[str, Any]:
+            """
+            Use the tool to think about something. 
+            
+            It will not obtain new information or change the database, but just append the thought to the log.
+            Use it when complex reasoning or some cache memory is needed.
+            
+            For best results, structure your reasoning with:
+            1) Problem definition
+            2) Relevant facts/context
+            3) Analysis steps
+            4) Conclusion/decision
+            
+            Args:
+                structuredReasoning: A structured thought process to work through complex problems
+                storeInMemory: Whether to store this thought in the knowledge graph
+                category: Optional category for the thought (e.g., "problem-solving", "analysis", "planning")
+                tags: Optional tags to help categorize and find this thought later
+                associateWithEntity: Optional entity name to associate this thought with
+                
+            Returns:
+                Dictionary with the processed thought and additional information
+            """
+            result = self.think_tool.process(
+                structured_reasoning=structuredReasoning,
+                store_in_memory=storeInMemory,
+                reflexion=self.config.enable_reflexion,
+                category=category,
+                tags=tags,
+                associate_with_entity=associateWithEntity
+            )
+            self.tools["think"] = "think"
+            return result
     
     def _register_task_tools(self) -> None:
         """Register task management tools"""
