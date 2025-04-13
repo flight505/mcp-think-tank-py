@@ -861,4 +861,448 @@ def download_local_model(force: bool = False) -> bool:
         
     except Exception as e:
         logger.error(f"Error downloading model: {e}")
-        return False 
+        return False
+
+class TasksTool:
+    """
+    Tool wrapper for Task Management to expose methods as MCP tools.
+    
+    This class wraps the TaskManager class and provides methods that
+    can be registered with the MCP server for task management functionality.
+    """
+    
+    def __init__(self, use_basic: bool = False):
+        """
+        Initialize the tasks tool.
+        
+        Args:
+            use_basic: If True, use a simplified version with reduced functionality
+        """
+        # Get configuration
+        from src.config import get_config
+        
+        config = get_config()
+        
+        # Initialize knowledge graph reference
+        self.knowledge_graph = None
+        
+        # Try to import MemoryTool for knowledge graph access
+        try:
+            from src.tools.memory import MemoryTool
+            memory_tool = MemoryTool(use_basic=use_basic)
+            self.knowledge_graph = memory_tool.knowledge_graph
+            logger.info("Successfully connected to knowledge graph")
+        except Exception as e:
+            logger.warning(f"Could not connect to knowledge graph: {e}")
+        
+        # Initialize with LLM client if possible
+        anthropic_api_key = None if use_basic else config.anthropic_api_key
+        
+        # Create TaskManager instance
+        self.task_manager = TaskManager(
+            knowledge_graph=self.knowledge_graph,
+            anthropic_api_key=anthropic_api_key
+        )
+        
+        # Dictionary to store active requests
+        self.requests = {}
+        
+        logger.info("Tasks Tool initialized")
+    
+    # MCP tool methods
+    
+    async def request_planning(self, originalRequest: str, tasks: List[Dict[str, str]], splitDetails: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Register a new user request and plan its associated tasks.
+        
+        Args:
+            originalRequest: The original user request
+            tasks: List of tasks with title and description
+            splitDetails: Optional details about how the request was split
+            
+        Returns:
+            Dictionary with request details and task information
+        """
+        # Generate a request ID
+        request_id = str(uuid.uuid4())
+        
+        # Store the request
+        self.requests[request_id] = {
+            "id": request_id,
+            "originalRequest": originalRequest,
+            "splitDetails": splitDetails,
+            "tasks": [],
+            "currentTaskIndex": 0,
+            "status": "planning"
+        }
+        
+        # Create the tasks
+        for task_data in tasks:
+            task_result = self.task_manager.create_task(
+                title=task_data.get("title", "Untitled Task"),
+                description=task_data.get("description", ""),
+                tags=["mcp-task-manager"]
+            )
+            
+            # Store task in request
+            self.requests[request_id]["tasks"].append({
+                "id": task_result.get("id"),
+                "title": task_data.get("title"),
+                "description": task_data.get("description"),
+                "status": "pending"
+            })
+        
+        # Update request status
+        self.requests[request_id]["status"] = "in_progress"
+        
+        return {
+            "requestId": request_id,
+            "originalRequest": originalRequest,
+            "tasks": self.requests[request_id]["tasks"],
+            "message": f"Created request with {len(tasks)} tasks"
+        }
+    
+    async def get_next_task(self, requestId: str) -> Dict[str, Any]:
+        """
+        Get the next pending task for a request.
+        
+        Args:
+            requestId: The ID of the request
+            
+        Returns:
+            Dictionary with the next task details or completion status
+        """
+        # Check if request exists
+        if requestId not in self.requests:
+            return {"error": f"Request {requestId} not found"}
+        
+        # Get the request
+        request = self.requests[requestId]
+        
+        # Check if all tasks are done
+        all_done = all(task.get("status") == "done" for task in request["tasks"])
+        if all_done:
+            return {
+                "requestId": requestId,
+                "all_tasks_done": True,
+                "message": "All tasks have been completed",
+                "tasks": request["tasks"]
+            }
+        
+        # Get the current task index
+        current_index = request["currentTaskIndex"]
+        
+        # Find the next pending task
+        next_task = None
+        for i in range(current_index, len(request["tasks"])):
+            if request["tasks"][i]["status"] == "pending":
+                next_task = request["tasks"][i]
+                request["currentTaskIndex"] = i
+                break
+        
+        # If no pending task found from current index, search from beginning
+        if next_task is None:
+            for i in range(0, current_index):
+                if request["tasks"][i]["status"] == "pending":
+                    next_task = request["tasks"][i]
+                    request["currentTaskIndex"] = i
+                    break
+        
+        if next_task:
+            return {
+                "requestId": requestId,
+                "taskId": next_task["id"],
+                "title": next_task["title"],
+                "description": next_task["description"],
+                "tasks": request["tasks"]
+            }
+        else:
+            # This shouldn't happen based on the all_done check, but just in case
+            return {
+                "requestId": requestId,
+                "all_tasks_done": True,
+                "message": "All tasks have been completed",
+                "tasks": request["tasks"]
+            }
+    
+    async def mark_task_done(self, requestId: str, taskId: str, completedDetails: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Mark a task as done.
+        
+        Args:
+            requestId: The ID of the request
+            taskId: The ID of the task
+            completedDetails: Optional details about how the task was completed
+            
+        Returns:
+            Dictionary with the updated task details
+        """
+        # Check if request exists
+        if requestId not in self.requests:
+            return {"error": f"Request {requestId} not found"}
+        
+        # Get the request
+        request = self.requests[requestId]
+        
+        # Find the task
+        task_found = False
+        for task in request["tasks"]:
+            if task["id"] == taskId:
+                task["status"] = "done"
+                if completedDetails:
+                    task["completedDetails"] = completedDetails
+                task_found = True
+                break
+        
+        if not task_found:
+            return {"error": f"Task {taskId} not found in request {requestId}"}
+        
+        # Update the task in the task manager
+        self.task_manager.update_task(taskId, {"status": "done"})
+        
+        return {
+            "requestId": requestId,
+            "taskId": taskId,
+            "status": "done",
+            "message": "Task marked as done",
+            "tasks": request["tasks"]
+        }
+    
+    async def approve_task_completion(self, requestId: str, taskId: str) -> Dict[str, Any]:
+        """
+        Approve a completed task.
+        
+        Args:
+            requestId: The ID of the request
+            taskId: The ID of the task
+            
+        Returns:
+            Dictionary with the approved task details
+        """
+        # Check if request exists
+        if requestId not in self.requests:
+            return {"error": f"Request {requestId} not found"}
+        
+        # Get the request
+        request = self.requests[requestId]
+        
+        # Find the task
+        task_found = False
+        for task in request["tasks"]:
+            if task["id"] == taskId:
+                if task["status"] != "done":
+                    return {"error": f"Task {taskId} is not marked as done"}
+                task["status"] = "approved"
+                task_found = True
+                break
+        
+        if not task_found:
+            return {"error": f"Task {taskId} not found in request {requestId}"}
+        
+        return {
+            "requestId": requestId,
+            "taskId": taskId,
+            "status": "approved",
+            "message": "Task completion approved",
+            "tasks": request["tasks"]
+        }
+    
+    async def approve_request_completion(self, requestId: str) -> Dict[str, Any]:
+        """
+        Approve the completion of an entire request.
+        
+        Args:
+            requestId: The ID of the request
+            
+        Returns:
+            Dictionary with the completed request details
+        """
+        # Check if request exists
+        if requestId not in self.requests:
+            return {"error": f"Request {requestId} not found"}
+        
+        # Get the request
+        request = self.requests[requestId]
+        
+        # Check if all tasks are done or approved
+        for task in request["tasks"]:
+            if task["status"] not in ["done", "approved"]:
+                return {"error": f"Not all tasks are completed or approved"}
+        
+        # Update request status
+        request["status"] = "completed"
+        
+        return {
+            "requestId": requestId,
+            "status": "completed",
+            "message": "Request completion approved",
+            "tasks": request["tasks"]
+        }
+    
+    async def open_task_details(self, taskId: str) -> Dict[str, Any]:
+        """
+        Get details for a specific task.
+        
+        Args:
+            taskId: The ID of the task
+            
+        Returns:
+            Dictionary with the task details
+        """
+        # Try to get the task from the task manager
+        try:
+            tasks = self.task_manager.list_tasks()
+            for task in tasks:
+                if task["id"] == taskId:
+                    return task
+            
+            return {"error": f"Task {taskId} not found"}
+        except Exception as e:
+            return {"error": f"Error retrieving task details: {str(e)}"}
+    
+    async def list_requests(self, random_string: str = "") -> Dict[str, Any]:
+        """
+        List all requests with their task summaries.
+        
+        Args:
+            random_string: Dummy parameter for no-parameter tools
+            
+        Returns:
+            Dictionary with the list of requests
+        """
+        return {
+            "requests": list(self.requests.values()),
+            "count": len(self.requests)
+        }
+    
+    async def add_tasks_to_request(self, requestId: str, tasks: List[Dict[str, str]]) -> Dict[str, Any]:
+        """
+        Add new tasks to an existing request.
+        
+        Args:
+            requestId: The ID of the request
+            tasks: List of tasks with title and description
+            
+        Returns:
+            Dictionary with the updated request details
+        """
+        # Check if request exists
+        if requestId not in self.requests:
+            return {"error": f"Request {requestId} not found"}
+        
+        # Get the request
+        request = self.requests[requestId]
+        
+        # Create and add the tasks
+        added_tasks = []
+        for task_data in tasks:
+            task_result = self.task_manager.create_task(
+                title=task_data.get("title", "Untitled Task"),
+                description=task_data.get("description", ""),
+                tags=["mcp-task-manager"]
+            )
+            
+            # Store task in request
+            task_info = {
+                "id": task_result.get("id"),
+                "title": task_data.get("title"),
+                "description": task_data.get("description"),
+                "status": "pending"
+            }
+            request["tasks"].append(task_info)
+            added_tasks.append(task_info)
+        
+        return {
+            "requestId": requestId,
+            "added_tasks": added_tasks,
+            "task_count": len(request["tasks"]),
+            "message": f"Added {len(added_tasks)} tasks to request",
+            "tasks": request["tasks"]
+        }
+    
+    async def update_task(self, requestId: str, taskId: str, title: Optional[str] = None, description: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Update a task in a request.
+        
+        Args:
+            requestId: The ID of the request
+            taskId: The ID of the task
+            title: Optional new title for the task
+            description: Optional new description for the task
+            
+        Returns:
+            Dictionary with the updated task details
+        """
+        # Check if request exists
+        if requestId not in self.requests:
+            return {"error": f"Request {requestId} not found"}
+        
+        # Get the request
+        request = self.requests[requestId]
+        
+        # Find the task
+        task_found = False
+        for task in request["tasks"]:
+            if task["id"] == taskId:
+                if title:
+                    task["title"] = title
+                if description:
+                    task["description"] = description
+                task_found = True
+                break
+        
+        if not task_found:
+            return {"error": f"Task {taskId} not found in request {requestId}"}
+        
+        # Update the task in the task manager
+        updates = {}
+        if title:
+            updates["title"] = title
+        if description:
+            updates["description"] = description
+            
+        self.task_manager.update_task(taskId, updates)
+        
+        return {
+            "requestId": requestId,
+            "taskId": taskId,
+            "message": "Task updated",
+            "tasks": request["tasks"]
+        }
+    
+    async def delete_task(self, requestId: str, taskId: str) -> Dict[str, Any]:
+        """
+        Delete a task from a request.
+        
+        Args:
+            requestId: The ID of the request
+            taskId: The ID of the task
+            
+        Returns:
+            Dictionary with the updated request details
+        """
+        # Check if request exists
+        if requestId not in self.requests:
+            return {"error": f"Request {requestId} not found"}
+        
+        # Get the request
+        request = self.requests[requestId]
+        
+        # Find and remove the task
+        for i, task in enumerate(request["tasks"]):
+            if task["id"] == taskId:
+                # Remove from request tasks
+                removed_task = request["tasks"].pop(i)
+                
+                # Delete from task manager
+                self.task_manager.delete_task(taskId)
+                
+                return {
+                    "requestId": requestId,
+                    "taskId": taskId,
+                    "message": "Task deleted",
+                    "deleted_task": removed_task,
+                    "tasks": request["tasks"]
+                }
+        
+        return {"error": f"Task {taskId} not found in request {requestId}"} 

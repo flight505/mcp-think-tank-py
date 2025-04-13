@@ -1273,7 +1273,7 @@ class MemoryTool:
         """
         # This functionality is not directly provided by KnowledgeGraph
         # We can implement it by deleting and recreating relations
-        deleted = self.knowledge_graph.delete_relations(relations)
+        _ = self.knowledge_graph.delete_relations(relations)
         created = self.knowledge_graph.create_relations(relations)
         
         return {

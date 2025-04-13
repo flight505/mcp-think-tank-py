@@ -12,7 +12,6 @@ import uuid
 import time
 import traceback
 
-from fastapi import FastAPI
 from fastmcp.server import FastMCP
 
 # Local imports
@@ -21,13 +20,75 @@ from .tools.think import ThinkTool
 from .tools.tasks import TasksTool
 from .watchers.file_watcher import FileWatcher
 from .tools.code_tools import CodeTools
-from .tools.dag_orchestrator import DAGExecutor, EmbeddingCache
+from .tools.dag_orchestrator import DAGExecutor, EmbeddingCache, DAGTask
 from .tools.workflow_templates import WorkflowFactory
 from .tools.workflow_error_handler import WorkflowErrorHandler, TimeoutManager
 from .tools.circuit_breaker import CircuitBreakerManager, CircuitOpenError
 from src.tools.monitoring import PerformanceTracker, track_memory_usage
 
 logger = logging.getLogger("mcp-think-tank.orchestrator")
+
+# Define the DAG class needed for workflow management
+class DAG:
+    """
+    Simple Directed Acyclic Graph implementation for workflow management.
+    
+    This class represents a workflow as a directed acyclic graph where nodes
+    are tasks and edges represent dependencies between tasks.
+    """
+    
+    def __init__(self, name: str, description: str = ""):
+        """
+        Initialize a DAG.
+        
+        Args:
+            name: Name of the DAG
+            description: Optional description
+        """
+        self.name = name
+        self.description = description
+        self.tasks = {}  # Dict mapping task_id to task
+        self.dependencies = {}  # Dict mapping task_id to set of dependency task_ids
+        
+    def add_task(self, task: DAGTask) -> None:
+        """
+        Add a task to the DAG.
+        
+        Args:
+            task: The task to add
+        """
+        self.tasks[task.task_id] = task
+        
+        # Initialize dependencies
+        if task.task_id not in self.dependencies:
+            self.dependencies[task.task_id] = set()
+        
+        # Add dependencies
+        for dep_id in task.dependencies:
+            self.dependencies[task.task_id].add(dep_id)
+            
+    def get_ready_tasks(self) -> List[str]:
+        """
+        Get tasks that are ready to execute (have no pending dependencies).
+        
+        Returns:
+            List of task IDs that are ready to execute
+        """
+        ready_tasks = []
+        
+        for task_id, deps in self.dependencies.items():
+            # Check if all dependencies are completed
+            all_deps_completed = True
+            for dep_id in deps:
+                if dep_id in self.tasks and self.tasks[dep_id].status != "completed":
+                    all_deps_completed = False
+                    break
+            
+            # If all dependencies are completed and task is pending, it's ready
+            if all_deps_completed and self.tasks[task_id].status == "pending":
+                ready_tasks.append(task_id)
+                
+        return ready_tasks
 
 class Orchestrator:
     """
@@ -46,6 +107,9 @@ class Orchestrator:
             mcp: The FastMCP instance
         """
         self.mcp = mcp
+        
+        # Setup logger
+        self.logger = logging.getLogger("mcp-think-tank.orchestrator")
         
         # Initialize tools with monitoring
         self._init_components_with_monitoring()
@@ -74,11 +138,11 @@ class Orchestrator:
                 track_memory_usage("before_init")
                 
                 # Initialize components
-                self._init_memory_tool()
-                self._init_think_tool()
-                self._init_tasks_tool()
-                self._init_file_watcher()
-                self._init_code_tools()
+                self.memory_tool = self._init_memory_tool()
+                self.think_tool = self._init_think_tool()
+                self.tasks_tool = self._init_tasks_tool()
+                self.file_watcher = self._init_file_watcher()
+                self.code_tools = self._init_code_tools()
                 
                 # Track memory after initialization
                 track_memory_usage("after_init")
@@ -148,7 +212,7 @@ class Orchestrator:
                     start_watching=False
                 )
                 return CodeTools(file_watcher)
-            except:
+            except Exception:  # Be more specific with the exception type
                 # Last resort, create a minimal implementation
                 logger.error("Failed to create even basic code tools, functionality will be limited")
                 return None
@@ -206,19 +270,14 @@ class Orchestrator:
         """Initialize the workflow factory."""
         try:
             with PerformanceTracker("init_workflow_factory"):
-                return WorkflowFactory(
-                    memory_tool=self.memory_tool,
-                    think_tool=self.think_tool,
-                    tasks_tool=self.tasks_tool,
-                    code_tool=self.code_tools
-                )
+                # Get configuration
+                from src.config import get_config
+                config = get_config()
+                return WorkflowFactory(config=config)
         except Exception as e:
             logger.error(f"Failed to initialize workflow factory: {e}")
             # Try with minimal requirements
-            return WorkflowFactory(
-                memory_tool=self.memory_tool,
-                think_tool=self.think_tool
-            )
+            return WorkflowFactory()
     
     def _init_error_handling(self):
         """
@@ -532,85 +591,117 @@ class Orchestrator:
     
     def _register_memory_tools(self) -> None:
         """Register memory-related tools with the MCP server."""
-        self.mcp.register_tools(
-            tool_name="think-tool",
-            tool_description="Knowledge graph management tools",
-            functions={
-                "create_entities": self.memory_tool.create_entities,
-                "create_relations": self.memory_tool.create_relations,
-                "add_observations": self.memory_tool.add_observations,
-                "delete_entities": self.memory_tool.delete_entities,
-                "delete_observations": self.memory_tool.delete_observations,
-                "delete_relations": self.memory_tool.delete_relations,
-                "read_graph": self.memory_tool.read_graph,
-                "search_nodes": self.memory_tool.search_nodes,
-                "open_nodes": self.memory_tool.open_nodes,
-                "update_entities": self.memory_tool.update_entities,
-                "update_relations": self.memory_tool.update_relations,
-            }
-        )
+        # FastMCP 2.1.0 no longer supports register_tools method
+        # Instead, we need to use decorators to register tools
+        
+        @self.mcp.tool(name="create_entities")
+        async def create_entities(entities):
+            return await self.memory_tool.create_entities(entities)
+        
+        @self.mcp.tool(name="create_relations")
+        async def create_relations(relations):
+            return await self.memory_tool.create_relations(relations)
+        
+        @self.mcp.tool(name="add_observations")
+        async def add_observations(observations):
+            return await self.memory_tool.add_observations(observations)
+        
+        @self.mcp.tool(name="delete_entities")
+        async def delete_entities(entityNames):
+            return await self.memory_tool.delete_entities(entityNames)
+        
+        @self.mcp.tool(name="delete_observations")
+        async def delete_observations(deletions):
+            return await self.memory_tool.delete_observations(deletions)
+        
+        @self.mcp.tool(name="delete_relations")
+        async def delete_relations(relations):
+            return await self.memory_tool.delete_relations(relations)
+        
+        @self.mcp.tool(name="read_graph")
+        async def read_graph(dummy=None):
+            return await self.memory_tool.read_graph()
+        
+        @self.mcp.tool(name="search_nodes")
+        async def search_nodes(query):
+            return await self.memory_tool.search_nodes(query)
+        
+        @self.mcp.tool(name="open_nodes")
+        async def open_nodes(names):
+            return await self.memory_tool.open_nodes(names)
+        
+        @self.mcp.tool(name="update_entities")
+        async def update_entities(entities):
+            return await self.memory_tool.update_entities(entities)
+        
+        @self.mcp.tool(name="update_relations")
+        async def update_relations(relations):
+            return await self.memory_tool.update_relations(relations)
     
     def _register_think_tools(self) -> None:
         """Register think tools with the MCP server."""
-        self.mcp.register_tools(
-            tool_name="think-tool",
-            tool_description="Thinking and reasoning tools",
-            functions={
-                "think": {
-                    "function": self.think_tool.think,
-                    "description": "Use the tool to think about something. It will not obtain new information or change the database, but just append the thought to the log. Use it when complex reasoning or some cache memory is needed. For best results, structure your reasoning with: 1) Problem definition, 2) Relevant facts/context, 3) Analysis steps, 4) Conclusion/decision.",
-                    "parameters": {
-                        "structuredReasoning": {
-                            "type": "string",
-                            "description": "A structured thought process to work through complex problems. Use this as a dedicated space for reasoning step-by-step.",
-                            "required": True,
-                            "minLength": 10
-                        },
-                        "category": {
-                            "type": "string",
-                            "description": "Optional category for the thought (e.g., \"problem-solving\", \"analysis\", \"planning\")",
-                            "required": False
-                        },
-                        "tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Optional tags to help categorize and find this thought later",
-                            "required": False
-                        },
-                        "associateWithEntity": {
-                            "type": "string",
-                            "description": "Optional entity name to associate this thought with",
-                            "required": False
-                        },
-                        "storeInMemory": {
-                            "type": "boolean",
-                            "description": "Whether to store this thought in the knowledge graph memory",
-                            "required": False,
-                            "default": False
-                        }
-                    }
-                }
-            }
-        )
+        # FastMCP 2.1.0 no longer supports register_tools method
+        # Instead, we need to use decorators to register tools
+        
+        @self.mcp.tool(name="think")
+        async def think(structuredReasoning, category=None, tags=None, associateWithEntity=None, storeInMemory=False):
+            """
+            Use the tool to think about something. It will not obtain new information or change the database, but just append the thought to the log. 
+            Use it when complex reasoning or some cache memory is needed. For best results, structure your reasoning with: 
+            1) Problem definition, 2) Relevant facts/context, 3) Analysis steps, 4) Conclusion/decision.
+            """
+            return await self.think_tool.think(
+                structuredReasoning=structuredReasoning,
+                category=category,
+                tags=tags,
+                associateWithEntity=associateWithEntity,
+                storeInMemory=storeInMemory
+            )
     
     def _register_tasks_tools(self) -> None:
         """Register task management tools with the MCP server."""
-        self.mcp.register_tools(
-            tool_name="mcp-taskmanager",
-            tool_description="Task management tools",
-            functions={
-                "request_planning": self.tasks_tool.request_planning,
-                "get_next_task": self.tasks_tool.get_next_task,
-                "mark_task_done": self.tasks_tool.mark_task_done,
-                "approve_task_completion": self.tasks_tool.approve_task_completion,
-                "approve_request_completion": self.tasks_tool.approve_request_completion,
-                "open_task_details": self.tasks_tool.open_task_details,
-                "list_requests": self.tasks_tool.list_requests,
-                "add_tasks_to_request": self.tasks_tool.add_tasks_to_request,
-                "update_task": self.tasks_tool.update_task,
-                "delete_task": self.tasks_tool.delete_task
-            }
-        )
+        # FastMCP 2.1.0 no longer supports register_tools method
+        # Instead, we need to use decorators to register tools
+        
+        @self.mcp.tool(name="request_planning")
+        async def request_planning(originalRequest, tasks, splitDetails=None):
+            return await self.tasks_tool.request_planning(originalRequest=originalRequest, tasks=tasks, splitDetails=splitDetails)
+        
+        @self.mcp.tool(name="get_next_task")
+        async def get_next_task(requestId):
+            return await self.tasks_tool.get_next_task(requestId=requestId)
+        
+        @self.mcp.tool(name="mark_task_done")
+        async def mark_task_done(requestId, taskId, completedDetails=None):
+            return await self.tasks_tool.mark_task_done(requestId=requestId, taskId=taskId, completedDetails=completedDetails)
+        
+        @self.mcp.tool(name="approve_task_completion")
+        async def approve_task_completion(requestId, taskId):
+            return await self.tasks_tool.approve_task_completion(requestId=requestId, taskId=taskId)
+        
+        @self.mcp.tool(name="approve_request_completion")
+        async def approve_request_completion(requestId):
+            return await self.tasks_tool.approve_request_completion(requestId=requestId)
+        
+        @self.mcp.tool(name="open_task_details")
+        async def open_task_details(taskId):
+            return await self.tasks_tool.open_task_details(taskId=taskId)
+        
+        @self.mcp.tool(name="list_requests")
+        async def list_requests(random_string=""):
+            return await self.tasks_tool.list_requests(random_string=random_string)
+        
+        @self.mcp.tool(name="add_tasks_to_request")
+        async def add_tasks_to_request(requestId, tasks):
+            return await self.tasks_tool.add_tasks_to_request(requestId=requestId, tasks=tasks)
+        
+        @self.mcp.tool(name="update_task")
+        async def update_task(requestId, taskId, title=None, description=None):
+            return await self.tasks_tool.update_task(requestId=requestId, taskId=taskId, title=title, description=description)
+        
+        @self.mcp.tool(name="delete_task")
+        async def delete_task(requestId, taskId):
+            return await self.tasks_tool.delete_task(requestId=requestId, taskId=taskId)
     
     def _register_code_tools(self) -> None:
         """Register code analysis and manipulation tools with the MCP server."""
@@ -618,14 +709,13 @@ class Orchestrator:
             logger.warning("Code tools not initialized, skipping tool registration")
             return
             
-        self.mcp.register_tools(
-            tool_name="code-tool",
-            tool_description="Code analysis and manipulation tools",
-            functions={
-                "search_code": self.code_tools.search_code,
-                "summarize_file": self.code_tools.summarize_file
-            }
-        )
+        @self.mcp.tool(name="search_code")
+        async def search_code(query, **kwargs):
+            return await self.code_tools.search_code(query=query, **kwargs)
+        
+        @self.mcp.tool(name="summarize_file")
+        async def summarize_file(filepath, **kwargs):
+            return await self.code_tools.summarize_file(filepath=filepath, **kwargs)
     
     def _register_workflow_tools(self) -> None:
         """
@@ -1057,250 +1147,192 @@ class Orchestrator:
         logger.info("Registered workflow management tools")
     
     def _register_dag_tools(self) -> None:
-        """
-        Register DAG orchestration tools with the MCP server.
+        """Register DAG orchestration tools with the MCP server."""
         
-        This method registers tools for creating and running directed acyclic
-        graphs (DAGs) of tasks, with support for dependency management,
-        parallel execution, timeout handling, and error recovery.
-        """
-        async def create_workflow(name: str, description: str = "") -> Dict[str, Any]:
-            """
-            Create a new workflow with the given name and description.
-            
-            Args:
-                name: Name of the workflow
-                description: Optional description of the workflow
-                
-            Returns:
-                Dict containing the workflow ID and other metadata
-            """
-            # Generate a unique task ID for this operation
-            task_id = f"create_workflow_{uuid.uuid4().hex[:8]}"
-            
-            # Define the actual function
-            def _create_workflow():
+        # FastMCP 2.1.0 no longer supports register_tools method
+        # Instead, we need to use decorators to register tools
+        
+        @self.mcp.tool(name="create_workflow")
+        async def create_workflow(name, description=""):
+            async def _create_workflow():
                 workflow_id = f"workflow_{len(self.workflows) + 1}"
+                
+                # Create a new DAG
+                dag = DAG(
+                    name=name,
+                    description=description
+                )
+                
+                # Store the workflow
                 self.workflows[workflow_id] = {
-                    "id": workflow_id,
+                    "dag": dag,
                     "name": name,
                     "description": description,
-                    "dag_executor": DAGExecutor(
-                        max_concurrency=10,
-                        metrics_enabled=True
-                    ),
-                    "created_at": str(datetime.now()),
-                    "status": "created"
+                    "status": "created",
+                    "created_at": datetime.now()
                 }
-                return {"workflow_id": workflow_id, "name": name, "status": "created"}
-            
-            # Execute with timeout and error recovery
-            result = await self._execute_with_timeout_and_recovery(
-                func=_create_workflow,
-                task_id=task_id
-            )
-            
-            if result["status"] == "success":
-                return result["result"]
-            else:
-                return {"error": result["message"]}
-        
-        async def add_task_to_workflow(
-            workflow_id: str,
-            task_id: str,
-            tool_name: str,
-            function_name: str,
-            parameters: Dict[str, Any],
-            dependencies: List[str] = None,
-            timeout: Optional[float] = None,
-            retry_count: int = 0,
-            description: str = ""
-        ) -> Dict[str, Any]:
-            """
-            Add a task to a workflow.
-            
-            Args:
-                workflow_id: ID of the workflow to add the task to
-                task_id: ID for the task (must be unique within the workflow)
-                tool_name: Name of the tool to use (e.g., "memory-tool")
-                function_name: Name of the function to call (e.g., "create_entities")
-                parameters: Parameters to pass to the function
-                dependencies: List of task IDs that must complete before this task
-                timeout: Maximum execution time in seconds (None for no timeout)
-                retry_count: Number of retry attempts on failure
-                description: Human-readable description of the task
                 
-            Returns:
-                Dict containing task metadata
-            """
+                logger.info(f"Created workflow {workflow_id}: {name}")
+                
+                return workflow_id
+                
+            # Execute with timeout and recovery
+            return await self._execute_with_timeout_and_recovery(
+                _create_workflow,
+                "create_workflow",
+                timeout=10.0
+            )
+        
+        @self.mcp.tool(name="add_task_to_workflow")
+        async def add_task_to_workflow(workflow_id, task_id, tool_name, function_name, parameters, dependencies=None, timeout=None, retry_count=0, description=""):
+            # Validate inputs
             if workflow_id not in self.workflows:
-                return {"error": f"Workflow {workflow_id} not found"}
+                return {"error": f"Workflow not found: {workflow_id}"}
             
-            workflow = self.workflows[workflow_id]
-            dag_executor = workflow["dag_executor"]
-            
-            # Get the function to call
+            # Check if tool and function exist
             tool_function = self._get_tool_function(tool_name, function_name)
             if not tool_function:
                 return {"error": f"Function {function_name} not found in tool {tool_name}"}
             
-            # Add the task to the DAG
-            dag_executor.add_task(
+            # Add task to DAG
+            dag = self.workflows[workflow_id]["dag"]
+            
+            # Create a DAG task
+            dag_task = DAGTask(
                 task_id=task_id,
-                func=tool_function,
-                kwargs=parameters,
+                tool_name=tool_name,
+                function_name=function_name,
+                parameters=parameters,
                 dependencies=dependencies or [],
                 timeout=timeout,
                 retry_count=retry_count,
-                description=description
+                description=description,
+                function=tool_function,
+                execute_with_timeout=lambda func, **kwargs: self._execute_with_timeout_and_recovery(
+                    func, task_id, workflow_id=workflow_id, timeout=timeout, retry_count=retry_count, **kwargs
+                )
             )
+            
+            # Add the task to the DAG
+            dag.add_task(dag_task)
+            
+            logger.info(f"Added task {task_id} to workflow {workflow_id}")
             
             return {
                 "workflow_id": workflow_id,
                 "task_id": task_id,
-                "status": "added",
-                "dependencies": dependencies or []
+                "status": "added"
             }
         
-        async def execute_workflow(workflow_id: str) -> Dict[str, Any]:
-            """
-            Execute all tasks in a workflow.
-            
-            Args:
-                workflow_id: ID of the workflow to execute
-                
-            Returns:
-                Dict containing execution results and metrics
-            """
+        @self.mcp.tool(name="execute_workflow")
+        async def execute_workflow(workflow_id):
             if workflow_id not in self.workflows:
-                return {"error": f"Workflow {workflow_id} not found"}
+                return {"error": f"Workflow not found: {workflow_id}"}
             
-            # Generate a unique task ID for this operation
-            task_id = f"execute_workflow_{workflow_id}"
-            
-            # Define the actual execution function
             async def _execute_workflow():
+                # Get the workflow
                 workflow = self.workflows[workflow_id]
-                dag_executor = workflow["dag_executor"]
+                dag = workflow["dag"]
                 
                 # Update workflow status
                 workflow["status"] = "running"
+                workflow["started_at"] = datetime.now()
                 
                 try:
                     # Execute the DAG
-                    results = await dag_executor.execute()
+                    results = await self.dag_executor.execute_dag(dag, context={"workflow_id": workflow_id})
                     
                     # Update workflow status
                     workflow["status"] = "completed"
-                    workflow["completed_at"] = str(datetime.now())
-                    
-                    # Get execution summary
-                    summary = dag_executor.get_execution_summary()
+                    workflow["completed_at"] = datetime.now()
+                    workflow["results"] = results
                     
                     return {
                         "workflow_id": workflow_id,
                         "status": "completed",
-                        "results": results,
-                        "summary": summary
+                        "results": results
                     }
                 except Exception as e:
                     # Update workflow status
                     workflow["status"] = "failed"
                     workflow["error"] = str(e)
                     
-                    # Get execution summary
-                    summary = dag_executor.get_execution_summary()
-                    
+                    logger.error(f"Workflow {workflow_id} failed: {e}")
                     return {
                         "workflow_id": workflow_id,
                         "status": "failed",
-                        "error": str(e),
-                        "summary": summary
+                        "error": str(e)
                     }
             
-            # Execute with timeout and error recovery
-            # We use a longer timeout for workflow execution
-            result = await self._execute_with_timeout_and_recovery(
-                func=_execute_workflow,
-                task_id=task_id,
-                workflow_id=workflow_id,
-                timeout=3600  # 1 hour timeout for workflow execution
+            # Execute with timeout
+            return await self._execute_with_timeout_and_recovery(
+                _execute_workflow,
+                f"execute_workflow_{workflow_id}",
+                timeout=None  # No timeout for workflow execution
             )
-            
-            if result["status"] == "success":
-                return result["result"]
-            else:
-                return {
-                    "workflow_id": workflow_id,
-                    "status": "failed",
-                    "error": result["message"]
-                }
         
-        async def get_workflow_status(workflow_id: str) -> Dict[str, Any]:
-            """
-            Get the status of a workflow.
-            
-            Args:
-                workflow_id: ID of the workflow
-                
-            Returns:
-                Dict containing workflow status and metrics
-            """
+        @self.mcp.tool(name="get_workflow_status")
+        async def get_workflow_status(workflow_id):
             if workflow_id not in self.workflows:
-                return {"error": f"Workflow {workflow_id} not found"}
+                return {"error": f"Workflow not found: {workflow_id}"}
             
+            # Get the workflow
             workflow = self.workflows[workflow_id]
-            dag_executor = workflow["dag_executor"]
             
-            # Get execution summary
-            summary = dag_executor.get_execution_summary()
+            # Get task statuses
+            dag = workflow["dag"]
+            task_statuses = {}
+            for task_id, task in dag.tasks.items():
+                task_statuses[task_id] = {
+                    "status": task.status,
+                    "started_at": task.started_at.isoformat() if task.started_at else None,
+                    "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                    "error": str(task.error) if task.error else None
+                }
             
             return {
                 "workflow_id": workflow_id,
                 "name": workflow["name"],
                 "status": workflow["status"],
-                "created_at": workflow["created_at"],
-                "completed_at": workflow.get("completed_at"),
-                "summary": summary
+                "created_at": workflow["created_at"].isoformat(),
+                "started_at": workflow.get("started_at", None).isoformat() if workflow.get("started_at") else None,
+                "completed_at": workflow.get("completed_at", None).isoformat() if workflow.get("completed_at") else None,
+                "tasks": task_statuses
             }
         
-        async def visualize_workflow(workflow_id: str) -> Dict[str, Any]:
-            """
-            Generate a visualization of a workflow.
-            
-            Args:
-                workflow_id: ID of the workflow
-                
-            Returns:
-                Dict containing visualization data
-            """
+        @self.mcp.tool(name="visualize_workflow")
+        async def visualize_workflow(workflow_id):
             if workflow_id not in self.workflows:
-                return {"error": f"Workflow {workflow_id} not found"}
+                return {"error": f"Workflow not found: {workflow_id}"}
             
+            # Get the workflow
             workflow = self.workflows[workflow_id]
-            dag_executor = workflow["dag_executor"]
+            dag = workflow["dag"]
             
-            # Get DAG visualization
-            visualization = dag_executor.visualize()
+            # Create a visualization
+            visualization = []
+            visualization.append(f"Workflow: {workflow['name']} ({workflow_id})")
+            visualization.append(f"Status: {workflow['status']}")
+            visualization.append("Tasks:")
+            
+            for task_id, task in dag.tasks.items():
+                dependencies = ", ".join(task.dependencies) if task.dependencies else "None"
+                visualization.append(f"  - {task_id} ({task.status}):")
+                visualization.append(f"    Tool: {task.tool_name}.{task.function_name}")
+                visualization.append(f"    Dependencies: {dependencies}")
+                
+                if task.started_at:
+                    visualization.append(f"    Started: {task.started_at.isoformat()}")
+                if task.completed_at:
+                    visualization.append(f"    Completed: {task.completed_at.isoformat()}")
+                if task.error:
+                    visualization.append(f"    Error: {str(task.error)}")
             
             return {
                 "workflow_id": workflow_id,
                 "name": workflow["name"],
                 "visualization": visualization
             }
-        
-        # Register DAG orchestration tools
-        self.mcp.register_tools(
-            tool_name="dag-orchestrator",
-            tool_description="Tools for orchestrating complex workflows with dependencies",
-            functions={
-                "create_workflow": create_workflow,
-                "add_task_to_workflow": add_task_to_workflow,
-                "execute_workflow": execute_workflow,
-                "get_workflow_status": get_workflow_status,
-                "visualize_workflow": visualize_workflow
-            }
-        )
     
     def _get_tool_function(self, tool_name: str, function_name: str) -> Optional[Callable]:
         """
@@ -1352,225 +1384,141 @@ class Orchestrator:
 
     def _register_error_tools(self):
         """Register error handling and circuit breaker tools with the MCP server."""
-        # Register error summary tool
-        self.mcp.register_tool(
-            "get_workflow_error_summary",
-            {
-                "description": "Get a summary of all errors that occurred during workflow execution",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "workflow_id": {"type": "string", "description": "ID of the workflow (optional)"}
-                    },
-                    "required": []
-                }
-            },
-            self._get_workflow_error_summary
-        )
+        # FastMCP 2.1.0 no longer supports register_tools method
+        # Instead, we need to use decorators to register tools
+        
+        @self.mcp.tool(name="get_workflow_error_summary")
+        def get_workflow_error_summary(workflow_id=None):
+            """
+            Get a summary of all errors that occurred during workflow execution.
+            
+            Args:
+                workflow_id: ID of the workflow (optional)
+                
+            Returns:
+                Dict containing error summary information
+            """
+            if not self.error_handler:
+                return {"error": "Error handler not initialized"}
+            
+            # Get error summary
+            summary = self.error_handler.get_error_summary()
+            
+            # Filter by workflow_id if provided
+            if workflow_id:
+                filtered_task_errors = {}
+                for task_id, errors in summary.get("task_errors", {}).items():
+                    filtered_errors = [
+                        error for error in errors 
+                        if error.get("context", {}).get("workflow_id") == workflow_id
+                    ]
+                    if filtered_errors:
+                        filtered_task_errors[task_id] = filtered_errors
+                
+                summary["task_errors"] = filtered_task_errors
+                summary["total_filtered_errors"] = sum(len(errors) for errors in filtered_task_errors.values())
+            
+            return summary
 
-        # Register timeout management tools
-        self.mcp.register_tool(
-            "update_task_timeout",
-            {
-                "description": "Update the timeout for a task",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string", "description": "ID of the task"},
-                        "timeout": {"type": "number", "description": "New timeout in seconds"}
-                    },
-                    "required": ["task_id", "timeout"]
-                }
-            },
-            self._update_task_timeout
-        )
+        @self.mcp.tool(name="update_task_timeout")
+        def update_task_timeout(task_id, timeout):
+            """
+            Update the timeout for a task.
+            
+            Args:
+                task_id: ID of the task
+                timeout: New timeout in seconds
+                
+            Returns:
+                Dict containing the new timeout
+            """
+            if not self.timeout_manager:
+                return {"error": "Timeout manager not initialized"}
+            
+            self.timeout_manager.update_timeout(task_id, timeout)
+            
+            return {
+                "task_id": task_id,
+                "timeout": timeout
+            }
 
-        # Register the adapt_timeout tool
-        self.mcp.register_tool(
-            "adapt_task_timeout",
-            {
-                "description": "Adapt the timeout for a task based on execution history",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string", "description": "ID of the task"}
-                    },
-                    "required": ["task_id"]
-                }
-            },
-            self._adapt_task_timeout
-        )
+        @self.mcp.tool(name="adapt_task_timeout")
+        def adapt_task_timeout(task_id):
+            """
+            Adapt the timeout for a task based on execution history.
+            
+            Args:
+                task_id: ID of the task
+                
+            Returns:
+                Dict containing the adapted timeout
+            """
+            if not self.timeout_manager:
+                return {"error": "Timeout manager not initialized"}
+            
+            timeout = self.timeout_manager.adapt_timeout(task_id)
+            
+            return {
+                "task_id": task_id,
+                "timeout": timeout,
+                "stats": self.timeout_manager.get_timeout_stats().get(task_id, {})
+            }
         
-        # Register circuit breaker tools
-        self.mcp.register_tool(
-            "get_circuit_breaker_status",
-            {
-                "description": "Get the status of a circuit breaker",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "service_name": {"type": "string", "description": "Name of the service/circuit"}
-                    },
-                    "required": ["service_name"]
-                }
-            },
-            self._get_circuit_breaker_status
-        )
+        @self.mcp.tool(name="get_circuit_breaker_status")
+        def get_circuit_breaker_status(service_name):
+            """
+            Get the status of a circuit breaker.
+            
+            Args:
+                service_name: Name of the service/circuit
+                
+            Returns:
+                Dict containing status information
+            """
+            if not self.circuit_manager:
+                return {"error": "Circuit breaker manager not initialized"}
+            
+            circuit = self.circuit_manager.get_circuit_breaker(service_name, create_if_missing=False)
+            if not circuit:
+                return {"error": f"No circuit breaker found for service {service_name}"}
+            
+            return circuit.get_health()
         
-        self.mcp.register_tool(
-            "reset_circuit_breaker",
-            {
-                "description": "Reset a circuit breaker to its initial state",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "service_name": {"type": "string", "description": "Name of the service/circuit"}
-                    },
-                    "required": ["service_name"]
-                }
-            },
-            self._reset_circuit_breaker
-        )
+        @self.mcp.tool(name="reset_circuit_breaker")
+        def reset_circuit_breaker(service_name):
+            """
+            Reset a circuit breaker to its initial state.
+            
+            Args:
+                service_name: Name of the service/circuit
+                
+            Returns:
+                Dict containing status information
+            """
+            if not self.circuit_manager:
+                return {"error": "Circuit breaker manager not initialized"}
+            
+            circuit = self.circuit_manager.get_circuit_breaker(service_name, create_if_missing=False)
+            if not circuit:
+                return {"error": f"No circuit breaker found for service {service_name}"}
+            
+            circuit.reset()
+            return {"status": "success", "message": f"Circuit breaker for {service_name} has been reset"}
         
-        self.mcp.register_tool(
-            "get_all_circuit_breakers",
-            {
-                "description": "Get status of all circuit breakers in the system",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            },
-            self._get_all_circuit_breakers
-        )
+        @self.mcp.tool(name="get_all_circuit_breakers")
+        def get_all_circuit_breakers():
+            """
+            Get status of all circuit breakers in the system.
+            
+            Returns:
+                Dict containing all circuit breaker statuses
+            """
+            if not self.circuit_manager:
+                return {"error": "Circuit breaker manager not initialized"}
+            
+            return self.circuit_manager.get_all_health()
 
         logger.info("Error handling tools registered successfully")
-
-    def _get_workflow_error_summary(self, workflow_id=None):
-        """
-        Get a summary of all errors that occurred during workflow execution.
-        
-        Args:
-            workflow_id: ID of the workflow (optional)
-            
-        Returns:
-            Dict containing error summary information
-        """
-        if not self.error_handler:
-            return {"error": "Error handler not initialized"}
-        
-        # Get error summary
-        summary = self.error_handler.get_error_summary()
-        
-        # Filter by workflow_id if provided
-        if workflow_id:
-            filtered_task_errors = {}
-            for task_id, errors in summary.get("task_errors", {}).items():
-                filtered_errors = [
-                    error for error in errors 
-                    if error.get("context", {}).get("workflow_id") == workflow_id
-                ]
-                if filtered_errors:
-                    filtered_task_errors[task_id] = filtered_errors
-            
-            summary["task_errors"] = filtered_task_errors
-            summary["total_filtered_errors"] = sum(len(errors) for errors in filtered_task_errors.values())
-        
-        return summary
-
-    def _update_task_timeout(self, task_id, timeout):
-        """
-        Update the timeout for a task.
-        
-        Args:
-            task_id: ID of the task
-            timeout: New timeout in seconds
-            
-        Returns:
-            Dict containing the new timeout
-        """
-        if not self.timeout_manager:
-            return {"error": "Timeout manager not initialized"}
-        
-        self.timeout_manager.update_timeout(task_id, timeout)
-        
-        return {
-            "task_id": task_id,
-            "timeout": timeout
-        }
-
-    def _adapt_task_timeout(self, task_id):
-        """
-        Adapt the timeout for a task based on execution history.
-        
-        Args:
-            task_id: ID of the task
-            
-        Returns:
-            Dict containing the adapted timeout
-        """
-        if not self.timeout_manager:
-            return {"error": "Timeout manager not initialized"}
-        
-        timeout = self.timeout_manager.adapt_timeout(task_id)
-        
-        return {
-            "task_id": task_id,
-            "timeout": timeout,
-            "stats": self.timeout_manager.get_timeout_stats().get(task_id, {})
-        }
-
-    def _get_circuit_breaker_status(self, service_name):
-        """
-        Get the status of a circuit breaker.
-        
-        Args:
-            service_name: Name of the service/circuit
-            
-        Returns:
-            Dict containing status information
-        """
-        if not self.circuit_manager:
-            return {"error": "Circuit breaker manager not initialized"}
-        
-        circuit = self.circuit_manager.get_circuit_breaker(service_name, create_if_missing=False)
-        if not circuit:
-            return {"error": f"No circuit breaker found for service {service_name}"}
-        
-        return circuit.get_health()
-
-    def _reset_circuit_breaker(self, service_name):
-        """
-        Reset a circuit breaker to its initial state.
-        
-        Args:
-            service_name: Name of the service/circuit
-            
-        Returns:
-            Dict containing status information
-        """
-        if not self.circuit_manager:
-            return {"error": "Circuit breaker manager not initialized"}
-        
-        circuit = self.circuit_manager.get_circuit_breaker(service_name, create_if_missing=False)
-        if not circuit:
-            return {"error": f"No circuit breaker found for service {service_name}"}
-        
-        circuit.reset()
-        return {"status": "success", "message": f"Circuit breaker for {service_name} has been reset"}
-
-    def _get_all_circuit_breakers(self):
-        """
-        Get status of all circuit breakers in the system.
-        
-        Returns:
-            Dict containing all circuit breaker statuses
-        """
-        if not self.circuit_manager:
-            return {"error": "Circuit breaker manager not initialized"}
-        
-        return self.circuit_manager.get_all_health()
 
     async def execute_tool_with_recovery(self, tool_name: str, function_name: str, 
                                         parameters: Dict[str, Any], context: Dict[str, Any] = None,
