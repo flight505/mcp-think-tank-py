@@ -28,7 +28,9 @@ class TaskStatus(Enum):
 
 
 class DAGTask:
-    """Represents a single task in a directed acyclic graph workflow."""
+    """
+    A task in a DAG with support for timeout handling, retries, and error recovery.
+    """
     
     def __init__(
         self,
@@ -46,95 +48,154 @@ class DAGTask:
         
         Args:
             task_id: Unique identifier for the task
-            func: Callable function to execute
+            func: Function to execute
             args: Positional arguments for the function
             kwargs: Keyword arguments for the function
-            timeout: Maximum execution time in seconds (None for no timeout)
-            retry_count: Number of retry attempts on failure
-            retry_delay: Delay between retry attempts in seconds
-            description: Human-readable description of the task
+            timeout: Timeout in seconds (None for no timeout)
+            retry_count: Number of times to retry on failure
+            retry_delay: Delay between retries in seconds
+            description: Description of the task
         """
         self.task_id = task_id
         self.func = func
         self.args = args
         self.kwargs = kwargs or {}
         self.timeout = timeout
-        self.retry_count = retry_count
+        self.max_retries = retry_count
         self.retry_delay = retry_delay
         self.description = description
         
-        # Runtime state
+        # Execution state
         self.status = TaskStatus.PENDING
         self.start_time = None
         self.end_time = None
         self.duration = None
-        self.result = None
-        self.error = None
         self.attempt = 0
-        
+        self.error = None
+        self.fallback_used = False
+    
     async def execute(self) -> Any:
         """
-        Execute the task function with timeout and retry handling.
+        Execute the task with timeout handling and retries.
         
         Returns:
-            The result of the task function.
-        
+            Result of the function execution
+            
         Raises:
-            Exception: If the task fails after all retry attempts.
+            Exception: If the task fails and retry_count is exceeded
         """
         self.start_time = datetime.now()
         self.status = TaskStatus.RUNNING
-        self.attempt = 0
+        self.attempt += 1
         
-        while True:
-            self.attempt += 1
-            try:
-                # Execute with timeout if specified
+        try:
+            # Execute the function with timeout if specified
+            if asyncio.iscoroutinefunction(self.func):
                 if self.timeout is not None:
                     result = await asyncio.wait_for(
-                        self._execute_func(), 
+                        self.func(*self.args, **self.kwargs),
                         timeout=self.timeout
                     )
                 else:
-                    result = await self._execute_func()
+                    result = await self.func(*self.args, **self.kwargs)
+            else:
+                # Handle synchronous functions
+                if self.timeout is not None:
+                    # Create an awaitable wrapper to apply timeout
+                    async def _sync_wrapper():
+                        loop = asyncio.get_running_loop()
+                        return await loop.run_in_executor(
+                            None, lambda: self.func(*self.args, **self.kwargs)
+                        )
+                    result = await asyncio.wait_for(_sync_wrapper(), timeout=self.timeout)
+                else:
+                    # Execute synchronously in a separate thread
+                    loop = asyncio.get_running_loop()
+                    result = await loop.run_in_executor(
+                        None, lambda: self.func(*self.args, **self.kwargs)
+                    )
+            
+            # Task completed successfully
+            self.status = TaskStatus.COMPLETED
+            self.end_time = datetime.now()
+            self.duration = (self.end_time - self.start_time).total_seconds()
+            return result
+            
+        except asyncio.TimeoutError:
+            logger.warning(f"Task {self.task_id} timed out after {self.timeout}s")
+            self.error = f"Timeout after {self.timeout}s"
+            
+            # Retry if we haven't reached the maximum number of retries
+            if self.attempt <= self.max_retries:
+                logger.info(f"Retrying task {self.task_id} ({self.attempt}/{self.max_retries})")
+                # Apply exponential backoff for retries
+                retry_delay = self.retry_delay * (2 ** (self.attempt - 1))
+                await asyncio.sleep(retry_delay)
+                return await self.execute()
+            
+            # Mark as timed out if we've exhausted retries
+            self.status = TaskStatus.TIMED_OUT
+            self.end_time = datetime.now()
+            self.duration = (self.end_time - self.start_time).total_seconds()
+            raise
+            
+        except Exception as e:
+            logger.error(f"Task {self.task_id} failed: {str(e)}")
+            self.error = str(e)
+            
+            # Retry if we haven't reached the maximum number of retries
+            if self.attempt <= self.max_retries:
+                logger.info(f"Retrying task {self.task_id} ({self.attempt}/{self.max_retries})")
+                # Apply exponential backoff for retries
+                retry_delay = self.retry_delay * (2 ** (self.attempt - 1))
+                await asyncio.sleep(retry_delay)
+                return await self.execute()
+            
+            # Mark as failed if we've exhausted retries
+            self.status = TaskStatus.FAILED
+            self.end_time = datetime.now()
+            self.duration = (self.end_time - self.start_time).total_seconds()
+            raise
+    
+    async def execute_with_fallback(self, fallback_func: Callable = None) -> Any:
+        """
+        Execute the task with fallback in case of failure.
+        
+        Args:
+            fallback_func: Fallback function to execute if the main function fails
+            
+        Returns:
+            Result of the function execution or fallback execution
+        """
+        try:
+            return await self.execute()
+        except Exception as e:
+            if fallback_func is not None:
+                logger.info(f"Using fallback for task {self.task_id} after failure: {str(e)}")
+                self.fallback_used = True
                 
-                # Success
+                # Create a new task for the fallback
+                fallback_task = DAGTask(
+                    task_id=f"{self.task_id}_fallback",
+                    func=fallback_func,
+                    args=self.args,
+                    kwargs=self.kwargs,
+                    timeout=self.timeout,
+                    retry_count=0,  # No retries for fallback
+                    description=f"Fallback for {self.description}"
+                )
+                
+                # Execute the fallback
+                result = await fallback_task.execute()
+                
+                # Update our status since fallback succeeded
                 self.status = TaskStatus.COMPLETED
-                self.result = result
                 self.end_time = datetime.now()
                 self.duration = (self.end_time - self.start_time).total_seconds()
-                logger.info(f"Task {self.task_id} completed in {self.duration:.3f}s")
                 return result
-                
-            except asyncio.TimeoutError:
-                self.status = TaskStatus.TIMED_OUT
-                self.error = f"Task timed out after {self.timeout}s"
-                logger.warning(f"Task {self.task_id} timed out after {self.timeout}s")
-                break
-                
-            except Exception as e:
-                logger.warning(f"Task {self.task_id} failed (attempt {self.attempt}/{self.retry_count + 1}): {str(e)}")
-                self.error = str(e)
-                
-                # Check if we should retry
-                if self.attempt <= self.retry_count:
-                    await asyncio.sleep(self.retry_delay)
-                    continue
-                else:
-                    self.status = TaskStatus.FAILED
-                    logger.error(f"Task {self.task_id} failed after {self.attempt} attempts: {str(e)}")
-                    break
-        
-        self.end_time = datetime.now()
-        self.duration = (self.end_time - self.start_time).total_seconds()
-        raise Exception(f"Task {self.task_id} failed: {self.error}")
-    
-    async def _execute_func(self) -> Any:
-        """Execute the task function, handling both async and sync functions."""
-        if asyncio.iscoroutinefunction(self.func):
-            return await self.func(*self.args, **self.kwargs)
-        else:
-            return await asyncio.to_thread(self.func, *self.args, **self.kwargs)
+            else:
+                # Re-raise the exception if no fallback is available
+                raise
 
 
 class DAGExecutor:

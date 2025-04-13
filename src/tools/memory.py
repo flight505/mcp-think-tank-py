@@ -14,6 +14,8 @@ from typing import Dict, List, Optional, Set, Any, Tuple, Union, Iterator
 import numpy as np
 from pydantic import BaseModel, Field, validator
 
+from src.tools.embeddings import EmbeddingProvider
+
 logger = logging.getLogger("mcp-think-tank.memory")
 
 class RecordType(str, Enum):
@@ -70,53 +72,94 @@ class KnowledgeGraph:
     Knowledge Graph with JSONL-based persistence and semantic search
     """
     
-    def __init__(self, memory_file_path: str, use_embeddings: bool = True):
+    def __init__(self, memory_file_path: str, use_embeddings: bool = True, 
+                 embedding_cache_size: int = 10000, embedding_cache_ttl: Optional[int] = None,
+                 load_limit: Optional[int] = None, load_deleted: bool = False):
         """
         Initialize the knowledge graph
         
         Args:
             memory_file_path: Path to the JSONL memory file
             use_embeddings: Whether to use embeddings for semantic search
+            embedding_cache_size: Size of the embedding cache (default: 10000)
+            embedding_cache_ttl: TTL in seconds for embedding cache entries (default: None)
+            load_limit: Maximum number of records to load initially (default: None = all records)
+            load_deleted: Whether to load deleted entities and relations (default: False)
         """
         self.memory_file_path = memory_file_path
         self.use_embeddings = use_embeddings
+        self.load_limit = load_limit
+        self.load_deleted = load_deleted
+        self.total_records = 0
+        self.loaded_records = 0
+        
+        # Performance metrics
+        self.load_time = 0.0
+        self.last_operation_time = 0.0
         
         # In-memory storage
         self.entities: Dict[str, Entity] = {}
         self.relations: List[Relation] = []
-        self.embedding_model = None
+        self.embedding_provider = None
+        
+        # File position tracking for incremental loading
+        self.file_position = 0
+        self.fully_loaded = False
         
         # Ensure the directory exists
         os.makedirs(os.path.dirname(self.memory_file_path), exist_ok=True)
         
+        # Initialize embedding provider
+        if self.use_embeddings:
+            self._init_embedding_provider(embedding_cache_size, embedding_cache_ttl)
+        
         # Load existing data if the file exists
         if os.path.exists(self.memory_file_path):
+            self._count_total_records()
             self._load_from_jsonl()
-            
-        # Initialize embedding model if needed
-        if self.use_embeddings:
-            self._init_embedding_model()
     
-    def _init_embedding_model(self):
-        """Initialize the embedding model for semantic search"""
-        # Defer import to avoid loading the model if not needed
+    def _init_embedding_provider(self, cache_size: int, cache_ttl: Optional[int]):
+        """
+        Initialize the embedding provider for semantic search
+        
+        Args:
+            cache_size: Size of the embedding cache
+            cache_ttl: TTL in seconds for embedding cache entries
+        """
         try:
-            from sentence_transformers import SentenceTransformer
-            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-            logger.info("Embedding model initialized successfully")
-        except ImportError:
-            logger.warning("sentence-transformers not installed, semantic search disabled")
-            self.use_embeddings = False
+            self.embedding_provider = EmbeddingProvider(
+                cache_capacity=cache_size,
+                cache_ttl=cache_ttl
+            )
+            logger.info("Embedding provider initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize embedding model: {e}")
+            logger.error(f"Failed to initialize embedding provider: {e}")
             self.use_embeddings = False
+    
+    def _count_total_records(self):
+        """Count the total number of records in the JSONL file"""
+        try:
+            with open(self.memory_file_path, 'r', encoding='utf-8') as f:
+                count = sum(1 for line in f if line.strip())
+                self.total_records = count
+                logger.info(f"Total records in memory file: {count}")
+        except Exception as e:
+            logger.error(f"Failed to count records: {e}")
+            self.total_records = 0
     
     def _load_from_jsonl(self):
         """Load existing data from the JSONL file"""
         logger.info(f"Loading knowledge graph from {self.memory_file_path}")
         
+        start_time = time.time()
+        
         try:
             with open(self.memory_file_path, 'r', encoding='utf-8') as f:
+                # Skip to the last position if we've already loaded some records
+                if self.file_position > 0:
+                    f.seek(self.file_position)
+                
+                records_loaded = 0
                 for line_number, line in enumerate(f, 1):
                     try:
                         # Skip empty lines
@@ -129,16 +172,75 @@ class KnowledgeGraph:
                         
                         # Process based on record type
                         self._process_journal_record(record)
+                        
+                        records_loaded += 1
+                        self.loaded_records += 1
+                        
+                        # Stop if we've reached the load limit
+                        if self.load_limit and records_loaded >= self.load_limit:
+                            # Save position for future loading
+                            self.file_position = f.tell()
+                            break
                     except json.JSONDecodeError:
                         logger.error(f"Invalid JSON on line {line_number}: {line}")
                     except Exception as e:
                         logger.error(f"Error processing line {line_number}: {e}")
-            
-            logger.info(f"Loaded {len(self.entities)} entities and {len(self.relations)} relations")
+                
+                # If we've processed all records, mark as fully loaded
+                if not self.load_limit or records_loaded < self.load_limit:
+                    self.fully_loaded = True
+                    self.file_position = f.tell()
+                
+                self.load_time = time.time() - start_time
+                logger.info(f"Loaded {records_loaded} records in {self.load_time:.2f}s")
+                logger.info(f"Memory usage: {len(self.entities)} entities, {len(self.relations)} relations")
+                
+                # If we're using embeddings, report cache stats
+                if self.use_embeddings and self.embedding_provider:
+                    cache_stats = self.embedding_provider.get_cache_stats()
+                    logger.info(f"Embedding cache stats: {cache_stats}")
         except FileNotFoundError:
             logger.info(f"Memory file {self.memory_file_path} not found, starting with empty graph")
+            self.fully_loaded = True
         except Exception as e:
             logger.error(f"Failed to load memory file: {e}")
+    
+    def load_more_records(self, limit: int = 1000) -> Dict[str, Any]:
+        """
+        Load more records from the JSONL file
+        
+        Args:
+            limit: Maximum number of additional records to load
+            
+        Returns:
+            Dictionary with loading statistics
+        """
+        if self.fully_loaded:
+            return {
+                "loaded": 0,
+                "total_loaded": self.loaded_records,
+                "total_records": self.total_records,
+                "fully_loaded": True,
+                "message": "All records already loaded"
+            }
+        
+        start_time = time.time()
+        prev_loaded = self.loaded_records
+        
+        self.load_limit = limit
+        self._load_from_jsonl()
+        
+        load_time = time.time() - start_time
+        records_loaded = self.loaded_records - prev_loaded
+        
+        return {
+            "loaded": records_loaded,
+            "total_loaded": self.loaded_records,
+            "total_records": self.total_records,
+            "fully_loaded": self.fully_loaded,
+            "load_time": load_time,
+            "message": f"Loaded {records_loaded} additional records in {load_time:.2f}s"
+        }
     
     def _process_journal_record(self, record: JournalRecord):
         """
@@ -149,6 +251,9 @@ class KnowledgeGraph:
         """
         if record.record_type == RecordType.ENTITY_CREATE:
             entity = Entity(**record.data)
+            # Skip deleted entities if not loading them
+            if not self.load_deleted and entity.deleted:
+                return
             self.entities[entity.name] = entity
         
         elif record.record_type == RecordType.ENTITY_UPDATE:
@@ -161,13 +266,20 @@ class KnowledgeGraph:
             name = record.data.get("name")
             if name in self.entities:
                 self.entities[name].deleted = True
+                # Remove from memory if we're not keeping deleted entities
+                if not self.load_deleted:
+                    self.entities.pop(name)
         
         elif record.record_type == RecordType.RELATION_CREATE:
             relation = Relation(**record.data)
-            # Only add if both entities exist and relation doesn't already exist
-            if (relation.from_entity in self.entities and 
-                relation.to_entity in self.entities and
-                not self._relation_exists(relation)):
+            # Skip if either entity doesn't exist or is deleted
+            if not self.load_deleted and (relation.deleted or 
+                                         relation.from_entity not in self.entities or 
+                                         relation.to_entity not in self.entities):
+                return
+                
+            # Only add if relation doesn't already exist
+            if not self._relation_exists(relation):
                 self.relations.append(relation)
         
         elif record.record_type == RecordType.RELATION_DELETE:
@@ -182,6 +294,10 @@ class KnowledgeGraph:
                     relation.relation_type == relation_type and
                     not relation.deleted):
                     relation.deleted = True
+                    
+                    # Remove from memory if we're not keeping deleted relations
+                    if not self.load_deleted:
+                        self.relations.remove(relation)
     
     def _append_to_jsonl(self, record: JournalRecord):
         """
@@ -191,8 +307,11 @@ class KnowledgeGraph:
             record: The record to append
         """
         try:
+            start_time = time.time()
             with open(self.memory_file_path, 'a', encoding='utf-8') as f:
                 f.write(json.dumps(record.model_dump()) + '\n')
+            self.last_operation_time = time.time() - start_time
+            self.total_records += 1
         except Exception as e:
             logger.error(f"Failed to append to memory file: {e}")
             raise
@@ -225,17 +344,50 @@ class KnowledgeGraph:
         Returns:
             A list of floats representing the embedding, or None if embeddings are disabled
         """
-        if not self.use_embeddings or not self.embedding_model:
+        if not self.use_embeddings or not self.embedding_provider:
             return None
             
         try:
             # Combine name, type, and observations for embedding
             text = f"{entity.name} {entity.entity_type} " + " ".join(entity.observations)
-            embedding = self.embedding_model.encode(text)
-            return embedding.tolist()  # Convert numpy array to list for JSON serialization
+            embedding = self.embedding_provider.generate_embedding(text)
+            return embedding
         except Exception as e:
             logger.error(f"Failed to generate embedding: {e}")
             return None
+    
+    def _generate_embeddings_batch(self, entities: List[Entity]) -> Dict[str, Optional[List[float]]]:
+        """
+        Generate embeddings for multiple entities in a batch
+        
+        Args:
+            entities: List of entities to generate embeddings for
+            
+        Returns:
+            Dictionary mapping entity names to embeddings
+        """
+        if not self.use_embeddings or not self.embedding_provider:
+            return {entity.name: None for entity in entities}
+            
+        try:
+            # Combine name, type, and observations for each entity
+            texts = [f"{entity.name} {entity.entity_type} " + " ".join(entity.observations) for entity in entities]
+            
+            # Get text hashes
+            text_hashes = [self.embedding_provider._get_text_hash(text) for text in texts]
+            
+            # Generate embeddings in batch
+            hash_to_embedding = self.embedding_provider.generate_embeddings_batch(texts)
+            
+            # Map entity names to embeddings
+            name_to_embedding = {}
+            for entity, text_hash in zip(entities, text_hashes):
+                name_to_embedding[entity.name] = hash_to_embedding.get(text_hash)
+                
+            return name_to_embedding
+        except Exception as e:
+            logger.error(f"Failed to generate embeddings batch: {e}")
+            return {entity.name: None for entity in entities}
     
     # Public API methods
     
@@ -250,8 +402,10 @@ class KnowledgeGraph:
         Returns:
             Dictionary with created and existing entity names
         """
+        start_time = time.time()
         created = []
         existing = []
+        new_entities = []
         
         for entity_data in entities_data:
             name = entity_data.get("name")
@@ -267,30 +421,46 @@ class KnowledgeGraph:
             
             # Create new entity
             entity = Entity(**entity_data)
-            
-            # Generate embedding if enabled
-            if self.use_embeddings:
-                entity.embedding = self._generate_embedding(entity)
+            new_entities.append(entity)
             
             # Update or create entity in memory
             self.entities[name] = entity
-            
-            # Append to JSONL
-            record = JournalRecord(
-                record_type=RecordType.ENTITY_CREATE,
-                data=entity.model_dump(),
-                actor=actor
-            )
-            self._append_to_jsonl(record)
-            
             created.append(name)
+        
+        # Generate embeddings in batch for better performance
+        if new_entities and self.use_embeddings:
+            name_to_embedding = self._generate_embeddings_batch(new_entities)
+            
+            # Update entities with embeddings
+            for entity in new_entities:
+                entity.embedding = name_to_embedding.get(entity.name)
+                
+                # Append to JSONL with embedding
+                record = JournalRecord(
+                    record_type=RecordType.ENTITY_CREATE,
+                    data=entity.model_dump(),
+                    actor=actor
+                )
+                self._append_to_jsonl(record)
+        else:
+            # Process entities individually if no embeddings or no entities
+            for entity in new_entities:
+                record = JournalRecord(
+                    record_type=RecordType.ENTITY_CREATE,
+                    data=entity.model_dump(),
+                    actor=actor
+                )
+                self._append_to_jsonl(record)
+        
+        self.last_operation_time = time.time() - start_time
         
         return {
             "created": created,
             "existing": existing,
             "incomplete": False,
             "message": f"Created {len(created)} new entities. {len(existing)} entities already existed.",
-            "imageEntities": len(entities_data)
+            "imageEntities": len(entities_data),
+            "operation_time": self.last_operation_time
         }
     
     def create_relations(self, relations_data: List[Dict[str, Any]], actor: Optional[str] = None) -> Dict[str, Any]:
@@ -516,7 +686,7 @@ class KnowledgeGraph:
             return []
         
         # Use semantic search if enabled and available
-        if use_semantic and self.use_embeddings and self.embedding_model:
+        if use_semantic and self.use_embeddings and self.embedding_provider:
             return self._semantic_search(query, limit)
         else:
             return self._keyword_search(query, limit)
@@ -563,7 +733,7 @@ class KnowledgeGraph:
         """
         try:
             # Generate query embedding
-            query_embedding = self.embedding_model.encode(query)
+            query_embedding = self.embedding_provider.generate_embedding(query)
             
             # Calculate similarity for each entity
             results = []
@@ -828,4 +998,67 @@ class KnowledgeGraph:
             return {
                 "success": False,
                 "message": f"Failed to compact journal: {str(e)}"
-            } 
+            }
+    
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about the knowledge graph
+        
+        Returns:
+            Dictionary with statistics
+        """
+        stats = {
+            "entities_count": len(self.entities),
+            "relations_count": len(self.relations),
+            "total_records": self.total_records,
+            "loaded_records": self.loaded_records,
+            "fully_loaded": self.fully_loaded,
+            "load_time": self.load_time,
+            "last_operation_time": self.last_operation_time,
+            "memory_file_size": os.path.getsize(self.memory_file_path) if os.path.exists(self.memory_file_path) else 0,
+            "use_embeddings": self.use_embeddings
+        }
+        
+        # Add embedding cache stats if available
+        if self.use_embeddings and self.embedding_provider:
+            stats["embedding_cache"] = self.embedding_provider.get_cache_stats()
+            
+        return stats
+    
+    def optimize_memory(self) -> Dict[str, Any]:
+        """
+        Optimize memory usage
+        
+        Returns:
+            Dictionary with optimization results
+        """
+        import gc
+        
+        start_time = time.time()
+        initial_entities = len(self.entities)
+        initial_relations = len(self.relations)
+        
+        # Remove deleted entities and relations if we're keeping them
+        if self.load_deleted:
+            self.entities = {name: entity for name, entity in self.entities.items() if not entity.deleted}
+            self.relations = [relation for relation in self.relations if not relation.deleted]
+        
+        # Optimize embedding cache if available
+        if self.use_embeddings and self.embedding_provider:
+            self.embedding_provider.optimize_memory()
+        
+        # Force garbage collection
+        gc.collect()
+        
+        optimization_time = time.time() - start_time
+        
+        return {
+            "initial_entities": initial_entities,
+            "initial_relations": initial_relations,
+            "current_entities": len(self.entities),
+            "current_relations": len(self.relations),
+            "entities_removed": initial_entities - len(self.entities),
+            "relations_removed": initial_relations - len(self.relations),
+            "optimization_time": optimization_time,
+            "message": f"Memory optimized in {optimization_time:.2f}s"
+        } 

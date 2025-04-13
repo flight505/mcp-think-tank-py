@@ -11,6 +11,11 @@ import os
 from typing import Dict, List, Optional, Any, Callable
 from datetime import datetime
 import uuid
+import time
+import traceback
+import sys
+import importlib.util
+from pathlib import Path
 
 from fastmcp import FastMCP
 from fastapi import FastAPI
@@ -26,6 +31,8 @@ from .tools.code_tools import CodeTools
 from .tools.dag_orchestrator import DAGExecutor, EmbeddingCache
 from .tools.workflow_templates import WorkflowFactory, WorkflowTemplate
 from .tools.workflow_error_handler import WorkflowErrorHandler, TimeoutManager
+from .tools.circuit_breaker import CircuitBreakerManager, CircuitOpenError
+from src.tools.monitoring import PerformanceTracker, track_tool_call, track_memory_usage
 
 logger = logging.getLogger("mcp-think-tank.orchestrator")
 
@@ -50,23 +57,15 @@ class Orchestrator:
         self.websocket_manager = websocket_manager
         self.mcp_server = MCPServer(app, websocket_manager)
         
-        # Initialize tools
-        self.memory_tool = self._init_memory_tool()
-        self.think_tool = self._init_think_tool()
-        self.tasks_tool = self._init_tasks_tool()
-        
-        # Initialize file watcher first, then code tools
-        self.file_watcher = self._init_file_watcher()
-        self.code_tools = self._init_code_tools()
-        
-        self.dag_executor = self._init_dag_executor()
-        self.embedding_cache = self._init_embedding_cache()
+        # Initialize tools with monitoring
+        self._init_components_with_monitoring()
         
         # Initialize workflow factory and active workflows
         self.workflow_factory = self._init_workflow_factory()
         self.workflows = {}
         self.error_handler = None
         self.timeout_manager = None
+        self.circuit_manager = None
         
         # Register all tools with the MCP server
         self._register_memory_tools()
@@ -77,10 +76,33 @@ class Orchestrator:
         self._register_workflow_tools()
         self._init_error_handling()
 
+    def _init_components_with_monitoring(self):
+        """Initialize components with performance tracking"""
+        try:
+            with PerformanceTracker("init_components"):
+                # Track memory before initialization
+                track_memory_usage("before_init")
+                
+                # Initialize components
+                self._init_memory_tool()
+                self._init_think_tool()
+                self._init_tasks_tool()
+                self._init_file_watcher()
+                self._init_code_tools()
+                
+                # Track memory after initialization
+                track_memory_usage("after_init")
+                
+                self.logger.info("All components initialized successfully")
+        except Exception as e:
+            self.logger.error(f"Error initializing components: {e}")
+            raise
+    
     def _init_memory_tool(self) -> MemoryTool:
         """Initialize the memory tool."""
         try:
-            return MemoryTool()
+            with PerformanceTracker("init_memory_tool"):
+                return MemoryTool()
         except Exception as e:
             logger.error(f"Failed to initialize memory tool: {e}")
             # Return a basic version or raise an exception
@@ -89,7 +111,8 @@ class Orchestrator:
     def _init_think_tool(self) -> ThinkTool:
         """Initialize the think tool."""
         try:
-            return ThinkTool()
+            with PerformanceTracker("init_think_tool"):
+                return ThinkTool()
         except Exception as e:
             logger.error(f"Failed to initialize think tool: {e}")
             # Return a basic version or raise an exception
@@ -98,7 +121,8 @@ class Orchestrator:
     def _init_tasks_tool(self) -> TasksTool:
         """Initialize the tasks tool."""
         try:
-            return TasksTool()
+            with PerformanceTracker("init_tasks_tool"):
+                return TasksTool()
         except Exception as e:
             logger.error(f"Failed to initialize tasks tool: {e}")
             # Return a basic version or raise an exception
@@ -110,18 +134,19 @@ class Orchestrator:
         This requires the file_watcher to be initialized first.
         """
         try:
-            if not self.file_watcher:
-                logger.warning("File watcher not initialized, creating basic code tools")
-                # Initialize with a new file watcher if needed
-                project_path = os.getenv("PROJECT_PATH", os.getcwd())
-                file_watcher = FileWatcher(
-                    project_path=project_path,
-                    knowledge_graph=self.memory_tool.knowledge_graph,
-                    start_watching=False
-                )
-                return CodeTools(file_watcher)
-            
-            return CodeTools(self.file_watcher)
+            with PerformanceTracker("init_code_tools"):
+                if not self.file_watcher:
+                    logger.warning("File watcher not initialized, creating basic code tools")
+                    # Initialize with a new file watcher if needed
+                    project_path = os.getenv("PROJECT_PATH", os.getcwd())
+                    file_watcher = FileWatcher(
+                        project_path=project_path,
+                        knowledge_graph=self.memory_tool.knowledge_graph,
+                        start_watching=False
+                    )
+                    return CodeTools(file_watcher)
+                
+                return CodeTools(self.file_watcher)
         except Exception as e:
             logger.error(f"Failed to initialize code tools: {e}")
             # Return a basic version or create a minimal implementation
@@ -141,12 +166,13 @@ class Orchestrator:
     def _init_dag_executor(self) -> DAGExecutor:
         """Initialize the DAG executor."""
         try:
-            return DAGExecutor(
-                max_concurrency=10,
-                global_timeout=None,
-                fail_fast=False,
-                metrics_enabled=True
-            )
+            with PerformanceTracker("init_dag_executor"):
+                return DAGExecutor(
+                    max_concurrency=10,
+                    global_timeout=None,
+                    fail_fast=False,
+                    metrics_enabled=True
+                )
         except Exception as e:
             logger.error(f"Failed to initialize DAG executor: {e}")
             # Return a basic version
@@ -155,7 +181,8 @@ class Orchestrator:
     def _init_embedding_cache(self) -> EmbeddingCache:
         """Initialize the embedding cache."""
         try:
-            return EmbeddingCache(max_size=1000)
+            with PerformanceTracker("init_embedding_cache"):
+                return EmbeddingCache(max_size=1000)
         except Exception as e:
             logger.error(f"Failed to initialize embedding cache: {e}")
             # Return a basic version
@@ -164,22 +191,23 @@ class Orchestrator:
     def _init_file_watcher(self) -> FileWatcher:
         """Initialize the file watcher."""
         try:
-            # Get project path from environment or use default
-            project_path = os.getenv("PROJECT_PATH", os.getcwd())
-            
-            # Initialize with proper configuration
-            file_watcher = FileWatcher(
-                project_path=project_path,
-                knowledge_graph=self.memory_tool.knowledge_graph,
-                file_patterns=["*.py", "*.md", "*.js", "*.ts", "*.html", "*.css"],
-                exclude_patterns=["__pycache__/*", "*.pyc", "node_modules/*", ".git/*"],
-                polling_interval=5.0
-            )
-            
-            # Start the file watcher in the background
-            file_watcher.start()
-            return file_watcher
-            
+            with PerformanceTracker("init_file_watcher"):
+                # Get project path from environment or use default
+                project_path = os.getenv("PROJECT_PATH", os.getcwd())
+                
+                # Initialize with proper configuration
+                file_watcher = FileWatcher(
+                    project_path=project_path,
+                    knowledge_graph=self.memory_tool.knowledge_graph,
+                    file_patterns=["*.py", "*.md", "*.js", "*.ts", "*.html", "*.css"],
+                    exclude_patterns=["__pycache__/*", "*.pyc", "node_modules/*", ".git/*"],
+                    polling_interval=5.0
+                )
+                
+                # Start the file watcher in the background
+                file_watcher.start()
+                return file_watcher
+                
         except Exception as e:
             logger.error(f"Failed to initialize file watcher: {e}")
             return None
@@ -187,12 +215,13 @@ class Orchestrator:
     def _init_workflow_factory(self) -> WorkflowFactory:
         """Initialize the workflow factory."""
         try:
-            return WorkflowFactory(
-                memory_tool=self.memory_tool,
-                think_tool=self.think_tool,
-                tasks_tool=self.tasks_tool,
-                code_tool=self.code_tools
-            )
+            with PerformanceTracker("init_workflow_factory"):
+                return WorkflowFactory(
+                    memory_tool=self.memory_tool,
+                    think_tool=self.think_tool,
+                    tasks_tool=self.tasks_tool,
+                    code_tool=self.code_tools
+                )
         except Exception as e:
             logger.error(f"Failed to initialize workflow factory: {e}")
             # Try with minimal requirements
@@ -205,19 +234,311 @@ class Orchestrator:
         """
         Initialize error handling components for workflows.
         
-        This method sets up the WorkflowErrorHandler and TimeoutManager
-        that are used for robust workflow execution with timeout
-        management and graceful error recovery.
+        This method sets up the WorkflowErrorHandler, TimeoutManager
+        and CircuitBreakerManager that are used for robust workflow
+        execution with timeout management and graceful error recovery.
         """
         try:
-            self.error_handler = WorkflowErrorHandler()
-            self.timeout_manager = TimeoutManager(default_timeout=60.0)  # 60 second default timeout
-            logger.info("Error handling components initialized successfully")
+            with PerformanceTracker("init_error_handling"):
+                self.error_handler = WorkflowErrorHandler()
+                self.timeout_manager = TimeoutManager(default_timeout=60.0)  # 60 second default timeout
+                self.circuit_manager = CircuitBreakerManager()
+                logger.info("Error handling components initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize error handling: {str(e)}")
             # Create basic versions if initialization fails
             self.error_handler = WorkflowErrorHandler()
             self.timeout_manager = TimeoutManager()
+            self.circuit_manager = CircuitBreakerManager()
+    
+    async def _execute_with_timeout_and_recovery(
+        self, 
+        func: Callable, 
+        task_id: str, 
+        workflow_id: Optional[str] = None,
+        timeout: Optional[float] = None,
+        retry_count: int = 0,
+        max_retries: int = 3,
+        fallback_func: Optional[Callable] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Execute a function with timeout and error recovery.
+        
+        This is a wrapper method that:
+        1. Applies proper timeouts
+        2. Handles errors gracefully with retries
+        3. Records execution metrics
+        4. Provides fallback mechanisms
+        5. Ensures the timeout resets after each call
+        6. Uses circuit breaker to prevent cascading failures
+        
+        Args:
+            func: The function to execute
+            task_id: ID of the task/tool
+            workflow_id: Optional ID of the workflow
+            timeout: Optional timeout in seconds (defaults to task's configured timeout)
+            retry_count: Current retry attempt
+            max_retries: Maximum number of retry attempts
+            fallback_func: Optional fallback function to use if the primary function fails
+            **kwargs: Arguments to pass to the function
+            
+        Returns:
+            Dict containing execution results or error information
+        """
+        # Get the effective timeout (from param, task config, or default)
+        effective_timeout = timeout
+        if not effective_timeout and self.timeout_manager:
+            effective_timeout = self.timeout_manager.get_timeout(task_id)
+        
+        # Get the circuit breaker for this task or service
+        service_name = task_id.split('.')[0] if '.' in task_id else task_id
+        circuit_breaker = self.circuit_manager.get_circuit_breaker(
+            service_name,
+            failure_threshold=5,
+            recovery_timeout=60.0,
+            half_open_max_calls=1
+        )
+        
+        start_time = time.time()
+        
+        try:
+            # Check if the circuit is open for this service
+            try:
+                # Execute the function with timeout and circuit breaker
+                if asyncio.iscoroutinefunction(func):
+                    if effective_timeout:
+                        # For async functions with circuit breaker
+                        async def _execute_with_circuit_breaker():
+                            return await circuit_breaker.execute_async(func, **kwargs)
+                        
+                        # Reset the timeout for each new call
+                        result = await asyncio.wait_for(_execute_with_circuit_breaker(), timeout=effective_timeout)
+                    else:
+                        # No timeout, but still use circuit breaker
+                        result = await circuit_breaker.execute_async(func, **kwargs)
+                else:
+                    if effective_timeout:
+                        # For sync functions with circuit breaker
+                        async def _sync_wrapper():
+                            return circuit_breaker.execute(func, **kwargs)
+                        
+                        result = await asyncio.wait_for(_sync_wrapper(), timeout=effective_timeout)
+                    else:
+                        # No timeout, but still use circuit breaker
+                        result = circuit_breaker.execute(func, **kwargs)
+                
+                # Record successful execution time
+                execution_time = time.time() - start_time
+                if self.timeout_manager:
+                    self.timeout_manager.record_execution_time(task_id, execution_time)
+                    
+                return {"status": "success", "result": result, "execution_time": execution_time}
+            
+            except CircuitOpenError as e:
+                logger.warning(f"Circuit for task {task_id} is OPEN. Fast-failing request.")
+                return {
+                    "status": "error",
+                    "error_type": "circuit_open",
+                    "message": str(e),
+                    "can_continue": False
+                }
+            
+        except asyncio.TimeoutError:
+            logger.warning(f"Task {task_id} timed out after {effective_timeout}s")
+            
+            # Handle timeout with error handler
+            if self.error_handler:
+                error = asyncio.TimeoutError(f"Task {task_id} timed out after {effective_timeout}s")
+                context = {"workflow_id": workflow_id} if workflow_id else {}
+                
+                can_continue, recovery_info = self.error_handler.handle_error(
+                    error=error,
+                    task_id=task_id,
+                    context=context,
+                    retry_count=retry_count,
+                    max_retries=max_retries
+                )
+                
+                # If we can retry, do so with increased timeout
+                if can_continue and recovery_info.get("action") == "retry":
+                    # Increase timeout if specified
+                    if recovery_info.get("increase_timeout") and self.timeout_manager:
+                        multiplier = recovery_info.get("timeout_multiplier", 1.5)
+                        new_timeout = self.timeout_manager.increase_timeout(task_id, multiplier)
+                        logger.info(f"Increasing timeout for task {task_id} to {new_timeout}s for retry {retry_count + 1}")
+                        timeout = new_timeout
+                    
+                    # Apply delay if specified
+                    delay = recovery_info.get("delay")
+                    if delay:
+                        await asyncio.sleep(delay)
+                    
+                    # Retry
+                    return await self._execute_with_timeout_and_recovery(
+                        func=func,
+                        task_id=task_id,
+                        workflow_id=workflow_id,
+                        timeout=timeout,
+                        retry_count=retry_count + 1,
+                        max_retries=max_retries,
+                        fallback_func=fallback_func,
+                        **kwargs
+                    )
+                
+                # If we should use a fallback, do so
+                elif can_continue and fallback_func and recovery_info.get("action") in ["fallback", "degrade"]:
+                    logger.info(f"Using fallback for task {task_id} after timeout")
+                    return await self._execute_with_timeout_and_recovery(
+                        func=fallback_func,
+                        task_id=f"{task_id}_fallback",
+                        workflow_id=workflow_id,
+                        timeout=timeout,  # Use the same timeout
+                        retry_count=0,  # Reset retry count for fallback
+                        max_retries=max_retries,
+                        fallback_func=None,  # No fallback for the fallback
+                        **kwargs
+                    )
+                
+                # Otherwise return error information
+                return {
+                    "status": "error",
+                    "error_type": "timeout",
+                    "message": f"Task {task_id} timed out after {effective_timeout}s",
+                    "can_continue": can_continue,
+                    "recovery_info": recovery_info
+                }
+            
+            # Basic error handling if no error handler
+            if retry_count < max_retries:
+                new_timeout = effective_timeout * 1.5 if effective_timeout else 60.0
+                logger.info(f"Retrying task {task_id} with timeout {new_timeout}s (attempt {retry_count + 1})")
+                
+                return await self._execute_with_timeout_and_recovery(
+                    func=func,
+                    task_id=task_id,
+                    workflow_id=workflow_id,
+                    timeout=new_timeout,
+                    retry_count=retry_count + 1,
+                    max_retries=max_retries,
+                    fallback_func=fallback_func,
+                    **kwargs
+                )
+            
+            if fallback_func:
+                logger.info(f"Using fallback for task {task_id} after timeout")
+                return await self._execute_with_timeout_and_recovery(
+                    func=fallback_func,
+                    task_id=f"{task_id}_fallback",
+                    workflow_id=workflow_id,
+                    timeout=effective_timeout,  # Use the same timeout
+                    retry_count=0,  # Reset retry count for fallback
+                    max_retries=max_retries,
+                    fallback_func=None,  # No fallback for the fallback
+                    **kwargs
+                )
+            
+            return {
+                "status": "error",
+                "error_type": "timeout",
+                "message": f"Task {task_id} timed out after {effective_timeout}s and exceeded retry limit"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error executing task {task_id}: {str(e)}")
+            
+            # Handle error with error handler
+            if self.error_handler:
+                context = {"workflow_id": workflow_id} if workflow_id else {}
+                
+                can_continue, recovery_info = self.error_handler.handle_error(
+                    error=e,
+                    task_id=task_id,
+                    context=context,
+                    retry_count=retry_count,
+                    max_retries=max_retries
+                )
+                
+                # If we can retry, do so
+                if can_continue and recovery_info.get("action") == "retry":
+                    # Apply delay if specified
+                    delay = recovery_info.get("delay")
+                    if delay:
+                        await asyncio.sleep(delay)
+                    
+                    # Retry
+                    return await self._execute_with_timeout_and_recovery(
+                        func=func,
+                        task_id=task_id,
+                        workflow_id=workflow_id,
+                        timeout=timeout,
+                        retry_count=retry_count + 1,
+                        max_retries=max_retries,
+                        fallback_func=fallback_func,
+                        **kwargs
+                    )
+                
+                # If we should use a fallback, do so
+                elif can_continue and fallback_func and recovery_info.get("action") in ["fallback", "degrade", "use_cache"]:
+                    logger.info(f"Using fallback for task {task_id} after error: {str(e)}")
+                    return await self._execute_with_timeout_and_recovery(
+                        func=fallback_func,
+                        task_id=f"{task_id}_fallback",
+                        workflow_id=workflow_id,
+                        timeout=timeout,  # Use the same timeout
+                        retry_count=0,  # Reset retry count for fallback
+                        max_retries=max_retries,
+                        fallback_func=None,  # No fallback for the fallback
+                        **kwargs
+                    )
+                
+                # Otherwise return error information
+                return {
+                    "status": "error",
+                    "error_type": recovery_info.get("action", "unknown"),
+                    "message": str(e),
+                    "can_continue": can_continue,
+                    "recovery_info": recovery_info
+                }
+            
+            # Basic error handling if no error handler
+            if retry_count < max_retries:
+                logger.info(f"Retrying task {task_id} after error: {str(e)} (attempt {retry_count + 1})")
+                
+                # Exponential backoff
+                delay = 0.5 * (2 ** retry_count)
+                await asyncio.sleep(delay)
+                
+                return await self._execute_with_timeout_and_recovery(
+                    func=func,
+                    task_id=task_id,
+                    workflow_id=workflow_id,
+                    timeout=timeout,
+                    retry_count=retry_count + 1,
+                    max_retries=max_retries,
+                    fallback_func=fallback_func,
+                    **kwargs
+                )
+            
+            if fallback_func:
+                logger.info(f"Using fallback for task {task_id} after error: {str(e)}")
+                return await self._execute_with_timeout_and_recovery(
+                    func=fallback_func,
+                    task_id=f"{task_id}_fallback",
+                    workflow_id=workflow_id,
+                    timeout=timeout,  # Use the same timeout
+                    retry_count=0,  # Reset retry count for fallback
+                    max_retries=max_retries,
+                    fallback_func=None,  # No fallback for the fallback
+                    **kwargs
+                )
+            
+            return {
+                "status": "error",
+                "error_type": "exception",
+                "message": str(e),
+                "traceback": traceback.format_exc()
+            }
     
     def _register_memory_tools(self) -> None:
         """Register memory-related tools with the MCP server."""
@@ -764,19 +1085,35 @@ class Orchestrator:
             Returns:
                 Dict containing the workflow ID and other metadata
             """
-            workflow_id = f"workflow_{len(self._workflows) + 1}"
-            self._workflows[workflow_id] = {
-                "id": workflow_id,
-                "name": name,
-                "description": description,
-                "dag_executor": DAGExecutor(
-                    max_concurrency=10,
-                    metrics_enabled=True
-                ),
-                "created_at": str(datetime.now()),
-                "status": "created"
-            }
-            return {"workflow_id": workflow_id, "name": name, "status": "created"}
+            # Generate a unique task ID for this operation
+            task_id = f"create_workflow_{uuid.uuid4().hex[:8]}"
+            
+            # Define the actual function
+            def _create_workflow():
+                workflow_id = f"workflow_{len(self._workflows) + 1}"
+                self._workflows[workflow_id] = {
+                    "id": workflow_id,
+                    "name": name,
+                    "description": description,
+                    "dag_executor": DAGExecutor(
+                        max_concurrency=10,
+                        metrics_enabled=True
+                    ),
+                    "created_at": str(datetime.now()),
+                    "status": "created"
+                }
+                return {"workflow_id": workflow_id, "name": name, "status": "created"}
+            
+            # Execute with timeout and error recovery
+            result = await self._execute_with_timeout_and_recovery(
+                func=_create_workflow,
+                task_id=task_id
+            )
+            
+            if result["status"] == "success":
+                return result["result"]
+            else:
+                return {"error": result["message"]}
         
         async def add_task_to_workflow(
             workflow_id: str,
@@ -848,42 +1185,65 @@ class Orchestrator:
             if workflow_id not in self._workflows:
                 return {"error": f"Workflow {workflow_id} not found"}
             
-            workflow = self._workflows[workflow_id]
-            dag_executor = workflow["dag_executor"]
+            # Generate a unique task ID for this operation
+            task_id = f"execute_workflow_{workflow_id}"
             
-            # Update workflow status
-            workflow["status"] = "running"
-            
-            try:
-                # Execute the DAG
-                results = await dag_executor.execute()
+            # Define the actual execution function
+            async def _execute_workflow():
+                workflow = self._workflows[workflow_id]
+                dag_executor = workflow["dag_executor"]
                 
                 # Update workflow status
-                workflow["status"] = "completed"
-                workflow["completed_at"] = str(datetime.now())
+                workflow["status"] = "running"
                 
-                # Get execution summary
-                summary = dag_executor.get_execution_summary()
-                
-                return {
-                    "workflow_id": workflow_id,
-                    "status": "completed",
-                    "results": results,
-                    "summary": summary
-                }
-            except Exception as e:
-                # Update workflow status
-                workflow["status"] = "failed"
-                workflow["error"] = str(e)
-                
-                # Get execution summary
-                summary = dag_executor.get_execution_summary()
-                
+                try:
+                    # Execute the DAG
+                    results = await dag_executor.execute()
+                    
+                    # Update workflow status
+                    workflow["status"] = "completed"
+                    workflow["completed_at"] = str(datetime.now())
+                    
+                    # Get execution summary
+                    summary = dag_executor.get_execution_summary()
+                    
+                    return {
+                        "workflow_id": workflow_id,
+                        "status": "completed",
+                        "results": results,
+                        "summary": summary
+                    }
+                except Exception as e:
+                    # Update workflow status
+                    workflow["status"] = "failed"
+                    workflow["error"] = str(e)
+                    
+                    # Get execution summary
+                    summary = dag_executor.get_execution_summary()
+                    
+                    return {
+                        "workflow_id": workflow_id,
+                        "status": "failed",
+                        "error": str(e),
+                        "summary": summary
+                    }
+            
+            # Execute with timeout and error recovery
+            # We use a longer timeout for workflow execution
+            result = await self._execute_with_timeout_and_recovery(
+                func=_execute_workflow,
+                task_id=task_id,
+                workflow_id=workflow_id,
+                timeout=3600  # 1 hour timeout for workflow execution
+            )
+            
+            if result["status"] == "success":
+                return result["result"]
+            else:
                 return {
                     "workflow_id": workflow_id,
                     "status": "failed",
-                    "error": str(e),
-                    "summary": summary
+                    "error": result["message"]
                 }
         
         async def get_workflow_status(workflow_id: str) -> Dict[str, Any]:
@@ -1001,41 +1361,11 @@ class Orchestrator:
     def register_tools(self):
         """Register all tools with the MCP server."""
         self._register_workflow_tools()
-        self._register_error_handling_tools()
+        self._register_error_tools()
 
-    def _register_error_handling_tools(self):
-        """
-        Register error handling tools with the MCP server.
-        
-        These tools provide error handling, recovery, and timeout
-        management capabilities for workflows.
-        """
-        if not self.mcp_server or not self.error_handler or not self.timeout_manager:
-            logger.warning("Cannot register error handling tools - required components not initialized")
-            return
-
-        # Register the handle_error tool
-        self.mcp_server.register_tool(
-            "handle_workflow_error",
-            {
-                "description": "Handle a workflow error with enhanced recovery mechanisms",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "error_message": {"type": "string", "description": "Error message"},
-                        "task_id": {"type": "string", "description": "ID of the task where the error occurred"},
-                        "workflow_id": {"type": "string", "description": "ID of the workflow"},
-                        "context": {"type": "object", "description": "Additional context about the error"},
-                        "retry_count": {"type": "integer", "description": "Number of retries already attempted"},
-                        "max_retries": {"type": "integer", "description": "Maximum number of retries allowed"}
-                    },
-                    "required": ["error_message", "task_id", "workflow_id"]
-                }
-            },
-            self._handle_workflow_error
-        )
-
-        # Register the get_error_summary tool
+    def _register_error_tools(self):
+        """Register error handling and circuit breaker tools with the MCP server."""
+        # Register error summary tool
         self.mcp_server.register_tool(
             "get_workflow_error_summary",
             {
@@ -1044,7 +1374,8 @@ class Orchestrator:
                     "type": "object",
                     "properties": {
                         "workflow_id": {"type": "string", "description": "ID of the workflow (optional)"}
-                    }
+                    },
+                    "required": []
                 }
             },
             self._get_workflow_error_summary
@@ -1082,53 +1413,52 @@ class Orchestrator:
             },
             self._adapt_task_timeout
         )
-
-        logger.info("Error handling tools registered successfully")
-
-    def _handle_workflow_error(self, error_message, task_id, workflow_id, context=None, retry_count=0, max_retries=3):
-        """
-        Handle a workflow error.
         
-        Args:
-            error_message: Error message
-            task_id: ID of the task where the error occurred
-            workflow_id: ID of the workflow
-            context: Additional context about the error
-            retry_count: Number of retries already attempted
-            max_retries: Maximum number of retries allowed
-            
-        Returns:
-            Dict containing recovery information
-        """
-        if not self.error_handler:
-            return {"error": "Error handler not initialized"}
-        
-        # Create an exception from the error message
-        error = Exception(error_message)
-        
-        # Add workflow_id to context
-        context = context or {}
-        context["workflow_id"] = workflow_id
-        
-        # Handle the error
-        can_continue, recovery_info = self.error_handler.handle_error(
-            error=error,
-            task_id=task_id,
-            context=context,
-            retry_count=retry_count,
-            max_retries=max_retries
+        # Register circuit breaker tools
+        self.mcp_server.register_tool(
+            "get_circuit_breaker_status",
+            {
+                "description": "Get the status of a circuit breaker",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "service_name": {"type": "string", "description": "Name of the service/circuit"}
+                    },
+                    "required": ["service_name"]
+                }
+            },
+            self._get_circuit_breaker_status
         )
         
-        # Add whether the workflow can continue
-        recovery_info["can_continue"] = can_continue
+        self.mcp_server.register_tool(
+            "reset_circuit_breaker",
+            {
+                "description": "Reset a circuit breaker to its initial state",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "service_name": {"type": "string", "description": "Name of the service/circuit"}
+                    },
+                    "required": ["service_name"]
+                }
+            },
+            self._reset_circuit_breaker
+        )
         
-        # If we need to increase timeout, do it
-        if recovery_info.get("action") == "retry" and recovery_info.get("increase_timeout"):
-            multiplier = recovery_info.get("timeout_multiplier", 1.5)
-            new_timeout = self.timeout_manager.increase_timeout(task_id, multiplier)
-            recovery_info["new_timeout"] = new_timeout
-        
-        return recovery_info
+        self.mcp_server.register_tool(
+            "get_all_circuit_breakers",
+            {
+                "description": "Get status of all circuit breakers in the system",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            self._get_all_circuit_breakers
+        )
+
+        logger.info("Error handling tools registered successfully")
 
     def _get_workflow_error_summary(self, workflow_id=None):
         """
@@ -1202,4 +1532,126 @@ class Orchestrator:
             "task_id": task_id,
             "timeout": timeout,
             "stats": self.timeout_manager.get_timeout_stats().get(task_id, {})
-        } 
+        }
+
+    def _get_circuit_breaker_status(self, service_name):
+        """
+        Get the status of a circuit breaker.
+        
+        Args:
+            service_name: Name of the service/circuit
+            
+        Returns:
+            Dict containing status information
+        """
+        if not self.circuit_manager:
+            return {"error": "Circuit breaker manager not initialized"}
+        
+        circuit = self.circuit_manager.get_circuit_breaker(service_name, create_if_missing=False)
+        if not circuit:
+            return {"error": f"No circuit breaker found for service {service_name}"}
+        
+        return circuit.get_health()
+
+    def _reset_circuit_breaker(self, service_name):
+        """
+        Reset a circuit breaker to its initial state.
+        
+        Args:
+            service_name: Name of the service/circuit
+            
+        Returns:
+            Dict containing status information
+        """
+        if not self.circuit_manager:
+            return {"error": "Circuit breaker manager not initialized"}
+        
+        circuit = self.circuit_manager.get_circuit_breaker(service_name, create_if_missing=False)
+        if not circuit:
+            return {"error": f"No circuit breaker found for service {service_name}"}
+        
+        circuit.reset()
+        return {"status": "success", "message": f"Circuit breaker for {service_name} has been reset"}
+
+    def _get_all_circuit_breakers(self):
+        """
+        Get status of all circuit breakers in the system.
+        
+        Returns:
+            Dict containing all circuit breaker statuses
+        """
+        if not self.circuit_manager:
+            return {"error": "Circuit breaker manager not initialized"}
+        
+        return self.circuit_manager.get_all_health()
+
+    async def execute_tool_with_recovery(self, tool_name: str, function_name: str, 
+                                        parameters: Dict[str, Any], context: Dict[str, Any] = None,
+                                        timeout: Optional[float] = None, 
+                                        max_retries: int = 3) -> Dict[str, Any]:
+        """
+        Execute a tool function with timeout handling and error recovery.
+        
+        This method provides a robust way to execute tool functions with:
+        - Proper timeout handling
+        - Automatic retries with exponential backoff
+        - Error recovery and fallback mechanisms
+        - Performance metrics recording
+        
+        Args:
+            tool_name: Name of the tool to use
+            function_name: Name of the function to call
+            parameters: Parameters to pass to the function
+            context: Additional context (e.g., workflow_id, task information)
+            timeout: Optional timeout in seconds
+            max_retries: Maximum number of retry attempts
+            
+        Returns:
+            Dict containing execution results or error information
+        """
+        # Generate a unique task ID for tracking
+        task_id = f"{tool_name}_{function_name}_{uuid.uuid4().hex[:8]}"
+        
+        # Get the function to execute
+        func = self._get_tool_function(tool_name, function_name)
+        if not func:
+            return {
+                "status": "error",
+                "error_type": "not_found",
+                "message": f"Function {function_name} not found in tool {tool_name}"
+            }
+            
+        # Get a fallback function if available
+        fallback_func = None
+        if hasattr(self, f"_fallback_{tool_name}_{function_name}"):
+            fallback_func = getattr(self, f"_fallback_{tool_name}_{function_name}")
+            
+        # Log the tool execution
+        workflow_id = context.get("workflow_id") if context else None
+        logger.info(f"Executing tool {tool_name}.{function_name} [task_id={task_id}, workflow={workflow_id}]")
+        
+        # Execute with timeout and error recovery
+        result = await self._execute_with_timeout_and_recovery(
+            func=func,
+            task_id=task_id,
+            workflow_id=workflow_id,
+            timeout=timeout,
+            max_retries=max_retries,
+            fallback_func=fallback_func,
+            **parameters
+        )
+        
+        # Add context information to the result
+        if context:
+            if "context" not in result:
+                result["context"] = {}
+            result["context"].update(context)
+        
+        # Log the result
+        status = result.get("status", "unknown")
+        if status == "success":
+            logger.info(f"Tool {tool_name}.{function_name} executed successfully in {result.get('execution_time', '?')}s")
+        else:
+            logger.warning(f"Tool {tool_name}.{function_name} execution failed: {result.get('message', 'Unknown error')}")
+        
+        return result 
