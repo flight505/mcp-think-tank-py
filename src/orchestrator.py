@@ -4,6 +4,7 @@ Orchestrator for MCP Think Tank
 Manages cross-tool intelligence and coordination
 """
 import logging
+import asyncio
 from typing import Dict, List, Optional, Any
 
 from fastmcp import FastMCP
@@ -12,6 +13,7 @@ from fastmcp import FastMCP
 from .config import get_config
 from .tools.memory import KnowledgeGraph
 from .tools.think import ThinkTool
+from .tools.tasks import TaskManager, download_local_model
 
 logger = logging.getLogger("mcp-think-tank.orchestrator")
 
@@ -42,6 +44,9 @@ class Orchestrator:
         
         # Initialize think tool
         self._init_think_tool()
+        
+        # Initialize task manager
+        self._init_task_manager()
     
     def _init_knowledge_graph(self):
         """Initialize the knowledge graph component"""
@@ -71,6 +76,24 @@ class Orchestrator:
             # Create a basic think tool without advanced features
             self.think_tool = ThinkTool(knowledge_graph=self.kg)
             logger.warning("Using basic think tool without reflection capabilities")
+    
+    def _init_task_manager(self):
+        """Initialize the task manager component"""
+        try:
+            # Get Anthropic API key from config
+            anthropic_api_key = getattr(self.config, "anthropic_api_key", None)
+            
+            # Initialize task manager with knowledge graph and API key
+            self.task_manager = TaskManager(
+                knowledge_graph=self.kg,
+                anthropic_api_key=anthropic_api_key
+            )
+            logger.info("Task manager initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize task manager: {e}")
+            # Create a basic task manager without LLM capabilities
+            self.task_manager = TaskManager(knowledge_graph=self.kg)
+            logger.warning("Using basic task manager without advanced parsing capabilities")
     
     def register_tools(self) -> None:
         """Register all tools and resources with the MCP server"""
@@ -296,15 +319,197 @@ class Orchestrator:
     
     def _register_task_tools(self) -> None:
         """Register task management tools"""
-        logger.info("Task tools registration placeholder")
+        logger.info("Registering task management tools")
         
-        # Will implement in future steps
+        if not self.task_manager:
+            logger.warning("Task manager not initialized, skipping registration")
+            return
+        
+        @self.mcp.tool()
+        def create_task(title: str,
+                       description: str = "",
+                       priority: str = "medium",
+                       tags: Optional[List[str]] = None,
+                       dependencies: Optional[List[str]] = None,
+                       assigned_to: Optional[str] = None,
+                       parent_id: Optional[str] = None) -> Dict[str, Any]:
+            """
+            Create a new task
+            
+            Args:
+                title: Task title
+                description: Task description
+                priority: Task priority (low, medium, high, critical)
+                tags: Optional list of tags
+                dependencies: Optional list of task IDs this task depends on
+                assigned_to: Optional assignee
+                parent_id: Optional parent task ID
+                
+            Returns:
+                Dict with the created task info
+            """
+            result = self.task_manager.create_task(
+                title=title,
+                description=description,
+                priority=priority,
+                tags=tags,
+                dependencies=dependencies,
+                assigned_to=assigned_to,
+                parent_id=parent_id
+            )
+            self.tools["create_task"] = "tasks"
+            return result
+        
+        @self.mcp.tool()
+        def list_tasks(status: Optional[str] = None,
+                      priority: Optional[str] = None,
+                      tags: Optional[List[str]] = None,
+                      assigned_to: Optional[str] = None) -> List[Dict[str, Any]]:
+            """
+            List tasks with optional filtering
+            
+            Args:
+                status: Optional status filter (todo, in_progress, blocked, done, cancelled)
+                priority: Optional priority filter (low, medium, high, critical)
+                tags: Optional tags filter (tasks must have at least one of these tags)
+                assigned_to: Optional assignee filter
+                
+            Returns:
+                List of matching tasks
+            """
+            result = self.task_manager.list_tasks(
+                status=status,
+                priority=priority,
+                tags=tags,
+                assigned_to=assigned_to
+            )
+            self.tools["list_tasks"] = "tasks"
+            return result
+        
+        @self.mcp.tool()
+        def update_task(task_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+            """
+            Update an existing task
+            
+            Args:
+                task_id: ID of the task to update
+                updates: Dictionary of fields to update. Can include:
+                  - title: New task title
+                  - description: New task description
+                  - status: New status (todo, in_progress, blocked, done, cancelled)
+                  - priority: New priority (low, medium, high, critical)
+                  - tags: New list of tags
+                  - dependencies: New list of task IDs this task depends on
+                  - assigned_to: New assignee
+                  - parent_id: New parent task ID
+                
+            Returns:
+                Dict with updated task info or error
+            """
+            result = self.task_manager.update_task(
+                task_id=task_id,
+                updates=updates
+            )
+            self.tools["update_task"] = "tasks"
+            return result
+        
+        @self.mcp.tool()
+        def delete_task(task_id: str) -> Dict[str, Any]:
+            """
+            Delete a task
+            
+            Args:
+                task_id: ID of the task to delete
+                
+            Returns:
+                Dict with result of the deletion
+            """
+            result = self.task_manager.delete_task(task_id=task_id)
+            self.tools["delete_task"] = "tasks"
+            return result
+        
+        @self.mcp.tool()
+        async def parse_tasks_from_text(text: str) -> List[Dict[str, Any]]:
+            """
+            Parse tasks from a text description using an LLM
+            
+            This tool uses AI to extract structured tasks from natural language descriptions,
+            such as project requirements or meeting notes. It will attempt to use the 
+            Anthropic API if available, or fall back to a local LLM if needed.
+            
+            Args:
+                text: Text to parse into tasks
+                
+            Returns:
+                List of parsed tasks
+            """
+            result = await self.task_manager.parse_tasks_from_text(text=text)
+            self.tools["parse_tasks_from_text"] = "tasks"
+            return result
     
     def _register_orchestrator_workflows(self) -> None:
         """Register orchestrated workflows that combine multiple tools"""
-        logger.info("Orchestrator workflows registration placeholder")
+        logger.info("Registering orchestrator workflows")
         
-        # Will implement in future steps
+        @self.mcp.tool()
+        async def auto_plan_workflow(text: str) -> Dict[str, Any]:
+            """
+            Automatically plan a workflow from text requirements
+            
+            This tool combines multiple steps:
+            1. Parse text into tasks using LLM
+            2. Create tasks in the system
+            3. Reflect on the tasks for completeness
+            4. Store the finalized tasks in memory
+            
+            Args:
+                text: Text describing the requirements or project
+                
+            Returns:
+                Dict with workflow results including created tasks
+            """
+            logger.info("Starting auto plan workflow")
+            
+            # Parse tasks
+            tasks = []
+            if self.task_manager:
+                try:
+                    # Use the async parse_tasks_from_text method
+                    tasks = await self.task_manager.parse_tasks_from_text(text)
+                    logger.info(f"Created {len(tasks)} tasks from requirements")
+                except Exception as e:
+                    logger.error(f"Error parsing tasks: {e}")
+            
+            # Reflect on tasks using the think tool if available
+            reflection = None
+            if self.think_tool and tasks:
+                try:
+                    # Format tasks for reflection
+                    tasks_text = "\n".join([
+                        f"Task {i+1}: {task.get('title')} - {task.get('description', 'No description')}"
+                        for i, task in enumerate(tasks)
+                    ])
+                    
+                    reflection_prompt = f"Review these tasks extracted from requirements and assess if they are complete and well-structured:\n\n{tasks_text}"
+                    
+                    reflection = self.think_tool.process(
+                        structured_reasoning=reflection_prompt,
+                        store_in_memory=True,
+                        category="task_planning",
+                        tags=["auto_plan", "task_review"]
+                    )
+                    logger.info("Generated reflection on tasks")
+                except Exception as e:
+                    logger.error(f"Error reflecting on tasks: {e}")
+            
+            # Return the workflow results
+            self.tools["auto_plan_workflow"] = "orchestrator"
+            return {
+                "workflow": "auto_plan",
+                "tasks_created": len(tasks),
+                "tasks": tasks,
+                "reflection": reflection
+            }
 
     def auto_retrieve_memory(self, query: str, limit: int = 3) -> List[Dict[str, Any]]:
         """

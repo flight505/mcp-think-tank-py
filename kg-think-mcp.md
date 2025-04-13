@@ -162,33 +162,38 @@ mcp-think-tank-nextgen/
 
 ## Phase 4: Task Management & Multi-Step Planning
 
-- [ ] **Advanced Task Tool**
-- [ ] Implement `create_tasks(prd_text: str) -> str`:
+- [x] **Advanced Task Tool**
+- [x] Implement `create_tasks(prd_text: str) -> str`:
   - Takes a project requirement or prompt, calls out to an internal function that uses **Anthropic** (Claude) or local LLM to parse tasks.
   - Stores each new task as a distinct "Task" entity in the knowledge graph, with fields like `title`, `status`, `priority`.
-- [ ] Implement `list_tasks() -> str`:
+- [x] Implement `list_tasks() -> str`:
   - Retrieves all "Task" entities from memory, returns them in a structured format (or JSON).
-- [ ] Implement `update_task(task_id: str, updates: dict) -> str`:
+- [x] Implement `update_task(task_id: str, updates: dict) -> str`:
   - Merges new data (e.g. `status=done`, `priority=high`) into the task entity.
   - Appends the update in `.jsonl`.
-- [ ] Implement `delete_task(task_id: str) -> str`:
+- [x] Implement `delete_task(task_id: str) -> str`:
   - Marks the "Task" entity as deleted in memory, appends a deletion record.
 
-- [ ] **Orchestrator-Driven Planning**
-- [ ] Within `orchestrator.py`, define a routine that automatically:
+- [x] **Orchestrator-Driven Planning**
+- [x] Within `orchestrator.py`, define a routine that automatically:
   - Calls `create_tasks` if the user says "Plan my project" or references a PRD.
   - As tasks are created, calls the think tool for a quick reflection pass (e.g. "Do these tasks make sense? Are they complete?").
   - Potentially queries memory for relevant domain knowledge to refine tasks.
-- [ ] Provide an orchestrator function `auto_plan_workflow` that can chain:
+- [x] Provide an orchestrator function `auto_plan_workflow` that can chain:
   1. Parse PRD → `create_tasks`
   2. `think` about tasks → reflection
   3. `update_task` if reflection suggests changes
   4. Store final tasks in memory with semantic embeddings
   - Return a final summary to the user.
 
-- [ ] **Claude / LLM Integration**
-- [ ] If we rely on Claude API calls, handle concurrency with `uv` and `asyncio`, including error handling and timeouts.
-- [ ] Show progress updates via `context.report_progress(...)` in the tool if a single call might take > 2 seconds.
+- [x] **LLM Integration for Task Parsing** *(Implementation Complete)*
+- [x] Implement **Option 1: Initial Setup Download** approach:
+  - Primary parser uses **Anthropic API** when available
+  - Fallback parser uses **Gemma 3 1B** model (~900MB) via Hugging Face
+  - Includes model download option during initial MCP setup/installation
+  - Creates wrapper function to select appropriate parser based on availability
+- [x] Handle concurrency with `asyncio`, including error handling and timeouts.
+- [x] Show progress information during model download and setup.
 
 ---
 

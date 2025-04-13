@@ -16,12 +16,17 @@ class Config:
     
     # Feature flags
     use_embeddings: bool
+    enable_reflexion: bool
     
     # API Keys (optional)
     anthropic_api_key: Optional[str] = None
     
     # Paths
     project_path: Optional[str] = None
+    
+    # Local model configuration
+    use_local_model: bool
+    local_model_path: Optional[str] = None
 
 
 def get_config() -> Config:
@@ -48,6 +53,7 @@ def get_config() -> Config:
     
     # Feature flags
     use_embeddings = os.environ.get("USE_EMBEDDINGS", "true").lower() == "true"
+    enable_reflexion = os.environ.get("ENABLE_REFLEXION", "true").lower() == "true"
     
     # API Keys
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -55,12 +61,19 @@ def get_config() -> Config:
     # Project path for file watchers (if applicable)
     project_path = os.environ.get("PROJECT_PATH")
     
+    # Local model configuration
+    use_local_model = os.environ.get("USE_LOCAL_MODEL", "true").lower() == "true"
+    local_model_path = os.environ.get("LOCAL_MODEL_PATH", os.path.join(base_dir, "models/gemma-3-1b"))
+    
     # Create and return the config
     return Config(
         memory_file_path=memory_file_path,
         use_embeddings=use_embeddings,
+        enable_reflexion=enable_reflexion,
         anthropic_api_key=anthropic_api_key,
         project_path=project_path,
+        use_local_model=use_local_model,
+        local_model_path=local_model_path
     )
 
 
