@@ -14,6 +14,8 @@ from .config import get_config
 from .tools.memory import KnowledgeGraph
 from .tools.think import ThinkTool
 from .tools.tasks import TaskManager, download_local_model
+from .watchers.file_watcher import FileWatcher
+from .tools.code_tools import CodeTools
 
 logger = logging.getLogger("mcp-think-tank.orchestrator")
 
@@ -38,6 +40,8 @@ class Orchestrator:
         self.kg = None  # Knowledge Graph
         self.think_tool = None  # Think Tool
         self.task_manager = None  # Task Manager
+        self.file_watcher = None  # File Watcher
+        self.code_tools = None  # Code Tools
         
         # Initialize knowledge graph
         self._init_knowledge_graph()
@@ -47,6 +51,12 @@ class Orchestrator:
         
         # Initialize task manager
         self._init_task_manager()
+        
+        # Initialize file watcher
+        self._init_file_watcher()
+        
+        # Initialize code tools
+        self._init_code_tools()
     
     def _init_knowledge_graph(self):
         """Initialize the knowledge graph component"""
@@ -95,6 +105,50 @@ class Orchestrator:
             self.task_manager = TaskManager(knowledge_graph=self.kg)
             logger.warning("Using basic task manager without advanced parsing capabilities")
     
+    def _init_file_watcher(self):
+        """Initialize the file watcher component"""
+        try:
+            # Get file watcher config
+            project_path = getattr(self.config, "project_path", ".")
+            file_patterns = getattr(self.config, "file_patterns", ["*.py", "*.js", "*.ts", "*.jsx", "*.tsx"])
+            exclude_patterns = getattr(self.config, "exclude_patterns", ["**/node_modules/**", "**/.git/**", "**/venv/**"])
+            polling_interval = getattr(self.config, "polling_interval", 10)
+            
+            # Initialize file watcher
+            self.file_watcher = FileWatcher(
+                project_path=project_path,
+                knowledge_graph=self.kg,
+                file_patterns=file_patterns,
+                exclude_patterns=exclude_patterns,
+                polling_interval=polling_interval
+            )
+            logger.info("File watcher initialized successfully")
+            
+            # Start file watcher in background
+            self.file_watcher.start()
+        except Exception as e:
+            logger.error(f"Failed to initialize file watcher: {e}")
+            # Create a basic file watcher without file watching capabilities
+            self.file_watcher = FileWatcher(
+                project_path=".",
+                knowledge_graph=self.kg,
+                start_watching=False
+            )
+            logger.warning("Using basic file watcher without file watching capabilities")
+    
+    def _init_code_tools(self):
+        """Initialize the code tools component"""
+        try:
+            if not self.file_watcher:
+                raise ValueError("File watcher not initialized")
+                
+            # Initialize code tools
+            self.code_tools = CodeTools(file_watcher=self.file_watcher)
+            logger.info("Code tools initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize code tools: {e}")
+            logger.warning("Code tools not available")
+    
     def register_tools(self) -> None:
         """Register all tools and resources with the MCP server"""
         logger.info("Registering tools with MCP server")
@@ -103,6 +157,7 @@ class Orchestrator:
         self._register_memory_tools()
         self._register_think_tools()
         self._register_task_tools()
+        self._register_file_tools()
         self._register_orchestrator_workflows()
         
         logger.info(f"Registered {len(self.tools)} tools with MCP server")
@@ -447,6 +502,93 @@ class Orchestrator:
             self.tools["parse_tasks_from_text"] = "tasks"
             return result
     
+    def _register_file_tools(self) -> None:
+        """Register file system and code tools"""
+        logger.info("Registering file system and code tools")
+        
+        if not self.code_tools or not self.file_watcher:
+            logger.warning("Code tools or file watcher not initialized, skipping registration")
+            return
+        
+        # Register code tools
+        self.code_tools.register_tools(self.mcp)
+        self.tools["search_code"] = "code"
+        self.tools["summarize_file"] = "code"
+        
+        # Register file indexing tool
+        @self.mcp.tool()
+        def index_files(path: Optional[str] = None, 
+                        patterns: Optional[List[str]] = None) -> Dict[str, Any]:
+            """
+            Index files in a directory to add them to the knowledge graph
+            
+            Args:
+                path: Optional specific path to index (relative to project root)
+                patterns: Optional file patterns to match (e.g., ["*.py", "*.js"])
+                
+            Returns:
+                Dict with indexing results
+            """
+            try:
+                result = self.file_watcher.index_files(path=path, patterns=patterns)
+                self.tools["index_files"] = "files"
+                return result
+            except Exception as e:
+                logger.error(f"Error indexing files: {e}")
+                return {
+                    "error": f"Error indexing files: {str(e)}",
+                    "files_indexed": 0
+                }
+        
+        # Register file changes tool
+        @self.mcp.tool()
+        def get_file_changes() -> Dict[str, Any]:
+            """
+            Get recent file changes detected by the file watcher
+            
+            Returns:
+                Dict with recent file changes
+            """
+            try:
+                result = self.file_watcher.get_recent_changes()
+                self.tools["get_file_changes"] = "files"
+                return result
+            except Exception as e:
+                logger.error(f"Error getting file changes: {e}")
+                return {
+                    "error": f"Error getting file changes: {str(e)}",
+                    "changes": []
+                }
+        
+        # Register auto-context injection tool
+        @self.mcp.tool()
+        def get_context_for_tool(queries: List[str], 
+                                max_results: int = 3) -> Dict[str, Any]:
+            """
+            Get context from the codebase based on queries for auto-context injection
+            
+            Args:
+                queries: List of search queries
+                max_results: Maximum number of results to return per query
+                
+            Returns:
+                Dictionary with context information
+            """
+            try:
+                result = self.code_tools.get_context_for_tool(
+                    queries=queries,
+                    max_results=max_results
+                )
+                self.tools["get_context_for_tool"] = "code"
+                return result
+            except Exception as e:
+                logger.error(f"Error getting context: {e}")
+                return {
+                    "error": f"Error getting context: {str(e)}",
+                    "context_blocks": [],
+                    "total_items": 0
+                }
+    
     def _register_orchestrator_workflows(self) -> None:
         """Register orchestrated workflows that combine multiple tools"""
         logger.info("Registering orchestrator workflows")
@@ -530,4 +672,16 @@ class Orchestrator:
             return self.kg.search_nodes(query, limit=limit)
         except Exception as e:
             logger.error(f"Error retrieving memory: {e}")
-            return [] 
+            return []
+    
+    def cleanup(self) -> None:
+        """Clean up resources and stop background processes"""
+        logger.info("Cleaning up orchestrator resources")
+        
+        # Stop file watcher if running
+        if self.file_watcher:
+            try:
+                self.file_watcher.stop()
+                logger.info("File watcher stopped")
+            except Exception as e:
+                logger.error(f"Error stopping file watcher: {e}") 
