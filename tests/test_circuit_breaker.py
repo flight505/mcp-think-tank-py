@@ -338,11 +338,13 @@ class TestOrchestratorCircuitBreaker(unittest.TestCase):
         # Create a mock MCP server
         mock_server = MagicMock()
         
-        # Create an orchestrator
-        orchestrator = Orchestrator(mcp_server=mock_server)
+        # Configure mocks to avoid duplicate instantiation issue
+        mock_instance = MagicMock()
+        mock_circuit_manager.return_value = mock_instance
         
-        # Call the error handling initialization method
-        orchestrator._init_error_handling()
+        # Create an orchestrator but don't call _init_error_handling manually
+        # since it's already called in the constructor
+        orchestrator = Orchestrator(mcp=mock_server)
         
         # Verify the circuit manager was created
         mock_circuit_manager.assert_called_once()
@@ -358,12 +360,16 @@ class TestOrchestratorCircuitBreaker(unittest.TestCase):
         mock_circuit_manager_instance.get_circuit_breaker.return_value = mock_circuit
         mock_circuit_manager.return_value = mock_circuit_manager_instance
         
+        # Create a mock timeout manager that returns a proper timeout value instead of a MagicMock
+        mock_timeout_instance = MagicMock()
+        mock_timeout_instance.get_timeout.return_value = 30.0  # Return an actual number
+        mock_timeout_manager.return_value = mock_timeout_instance
+        
         # Create a mock MCP server
         mock_server = MagicMock()
         
         # Create an orchestrator
-        orchestrator = Orchestrator(mcp_server=mock_server)
-        orchestrator._init_error_handling()
+        orchestrator = Orchestrator(mcp=mock_server)
         
         # Create a test function
         def test_func():

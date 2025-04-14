@@ -8,8 +8,10 @@ License: MIT
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 Requires-Dist: fastmcp>=2.0.0
+Requires-Dist: mcp[cli]>=1.6.0
 Requires-Dist: pydantic>=2.0.0
 Requires-Dist: tqdm
+Requires-Dist: numpy>=1.24.0
 Provides-Extra: anthropic
 Requires-Dist: anthropic>=0.5.0; extra == "anthropic"
 Provides-Extra: local-llm
@@ -19,6 +21,7 @@ Requires-Dist: transformers; extra == "local-llm"
 Requires-Dist: accelerate; extra == "local-llm"
 Provides-Extra: embeddings
 Requires-Dist: sentence-transformers; extra == "embeddings"
+Requires-Dist: numpy>=1.24.0; extra == "embeddings"
 Provides-Extra: all
 Requires-Dist: anthropic>=0.5.0; extra == "all"
 Requires-Dist: huggingface_hub; extra == "all"

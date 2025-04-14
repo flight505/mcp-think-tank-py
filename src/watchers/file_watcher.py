@@ -10,6 +10,7 @@ import time
 import hashlib
 import threading
 from typing import Dict, List, Any, Set, Optional, Tuple, Callable
+from datetime import datetime
 
 logger = logging.getLogger("mcp-think-tank.file_watcher")
 
@@ -229,6 +230,16 @@ class FileWatcher:
                             metadata = self.file_metadata.get(rel_path, {})
                             last_modified = metadata.get("last_modified", 0)
                             
+                            # Convert ISO format string to timestamp if it's a string
+                            if isinstance(last_modified, str):
+                                try:
+                                    # Parse ISO format string to datetime then to timestamp
+                                    last_modified_dt = datetime.fromisoformat(last_modified)
+                                    last_modified = last_modified_dt.timestamp()
+                                except (ValueError, TypeError):
+                                    # If parsing fails, set to 0 to force update
+                                    last_modified = 0
+                            
                             if file_mtime > last_modified:
                                 # Modified file
                                 self._index_file(file_path)
@@ -329,13 +340,17 @@ class FileWatcher:
                 text_content = None
                 line_count = 0
             
+            # Convert timestamps to ISO format strings
+            last_modified_time = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
+            created_time = datetime.fromtimestamp(file_stat.st_ctime).isoformat()
+            
             # Basic metadata
             metadata = {
                 "file_path": rel_path,
                 "abs_path": file_path,
                 "size_bytes": file_stat.st_size,
-                "last_modified": file_stat.st_mtime,
-                "created": file_stat.st_ctime,
+                "last_modified": last_modified_time,  # ISO format string
+                "created": created_time,              # ISO format string
                 "hash": content_hash,
                 "extension": ext,
                 "line_count": line_count,
@@ -360,7 +375,7 @@ class FileWatcher:
                 "file_path": os.path.relpath(file_path, self.project_path),
                 "error": str(e),
                 "hash": "",
-                "last_modified": 0
+                "last_modified": datetime.now().isoformat()  # Use ISO format string
             }
     
     def _extract_python_metadata(self, content: str) -> Dict[str, Any]:
@@ -536,7 +551,7 @@ class FileWatcher:
                 f"Path: {rel_path}",
                 f"Type: {metadata.get('extension', 'unknown')} file",
                 f"Lines: {metadata.get('line_count', 0)}",
-                f"Last modified: {time.ctime(metadata.get('last_modified', 0))}"
+                f"Last modified: {metadata.get('last_modified', datetime.now().isoformat())}"
             ]
             
             # Add language-specific observations
@@ -631,9 +646,17 @@ class FileWatcher:
         
         changes = []
         for rel_path, metadata in recent_files:
+            # Convert timestamp to string to ensure JSON serialization
+            last_modified = metadata.get("last_modified", 0)
+            if isinstance(last_modified, (int, float)):
+                last_modified_str = time.ctime(last_modified)
+            else:
+                # Handle datetime objects
+                last_modified_str = last_modified.isoformat() if hasattr(last_modified, 'isoformat') else str(last_modified)
+                
             changes.append({
                 "file_path": rel_path,
-                "last_modified": time.ctime(metadata.get("last_modified", 0)),
+                "last_modified": last_modified_str,
                 "size_bytes": metadata.get("size_bytes", 0),
                 "language": metadata.get("language", "unknown")
             })
@@ -760,7 +783,7 @@ class FileWatcher:
                     "line_count": metadata.get("line_count", 0),
                     "language": metadata.get("language", "unknown"),
                     "extension": metadata.get("extension", ""),
-                    "last_modified": time.ctime(metadata.get("last_modified", 0))
+                    "last_modified": metadata.get("last_modified", "Unknown")  # Just return the ISO format string directly
                 },
                 "summary": metadata.get("summary", "No summary available"),
                 "structure": structure

@@ -36,10 +36,10 @@ def get_config() -> Config:
     Returns:
         Config: Configuration object with all settings
     """
-    # Directory for storing data, defaults to ~/.mcp-think-tank
+    # Directory for storing data, defaults to ~/.mcp-think-tank-v2
     base_dir = os.environ.get(
         "MEMORY_DIR_PATH", 
-        os.path.expanduser("~/.mcp-think-tank")
+        os.path.expanduser("~/.mcp-think-tank-v2")
     )
     
     # Ensure the base directory exists

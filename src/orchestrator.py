@@ -718,12 +718,10 @@ class Orchestrator:
             return await self.code_tools.summarize_file(filepath=filepath, **kwargs)
     
     def _register_workflow_tools(self) -> None:
-        """
-        Register workflow-related tools with the MCP server.
+        """Register workflow-related tools with the MCP server."""
         
-        This method registers tools for creating and managing workflows
-        based on predefined templates.
-        """
+        # Register tools using decorator approach
+        @self.mcp.tool(name="create_feature_workflow")
         async def create_feature_workflow(feature_description: str, workflow_id: Optional[str] = None) -> Dict[str, Any]:
             """
             Create a workflow for implementing a new feature.
@@ -754,16 +752,17 @@ class Orchestrator:
                 
                 return {
                     "workflow_id": workflow_id,
-                    "name": workflow.name,
-                    "description": workflow.description,
+                    "name": workflow.get("name"),
+                    "description": workflow.get("description"),
                     "feature_description": feature_description,
-                    "status": workflow.status,
-                    "created_at": workflow.created_at.isoformat()
+                    "status": workflow.get("status"),
+                    "created_at": workflow.get("created_at").isoformat() if workflow.get("created_at") else None
                 }
             except Exception as e:
                 logger.error(f"Failed to create feature workflow: {e}")
                 return {"error": f"Failed to create feature workflow: {str(e)}"}
-        
+                
+        @self.mcp.tool(name="create_bugfix_workflow")
         async def create_bugfix_workflow(bug_description: str, error_logs: Optional[str] = None, workflow_id: Optional[str] = None) -> Dict[str, Any]:
             """
             Create a workflow for fixing a bug.
@@ -795,16 +794,17 @@ class Orchestrator:
                 
                 return {
                     "workflow_id": workflow_id,
-                    "name": workflow.name,
-                    "description": workflow.description,
+                    "name": workflow.get("name"),
+                    "description": workflow.get("description"),
                     "bug_description": bug_description,
-                    "status": workflow.status,
-                    "created_at": workflow.created_at.isoformat()
+                    "status": workflow.get("status"),
+                    "created_at": workflow.get("created_at").isoformat() if workflow.get("created_at") else None
                 }
             except Exception as e:
                 logger.error(f"Failed to create bug fix workflow: {e}")
                 return {"error": f"Failed to create bug fix workflow: {str(e)}"}
         
+        @self.mcp.tool(name="create_review_workflow")
         async def create_review_workflow(files_to_review: List[str], review_context: Optional[str] = None, workflow_id: Optional[str] = None) -> Dict[str, Any]:
             """
             Create a workflow for reviewing code.
@@ -836,16 +836,17 @@ class Orchestrator:
                 
                 return {
                     "workflow_id": workflow_id,
-                    "name": workflow.name,
-                    "description": workflow.description,
+                    "name": workflow.get("name"),
+                    "description": workflow.get("description"),
                     "files_to_review": files_to_review,
-                    "status": workflow.status,
-                    "created_at": workflow.created_at.isoformat()
+                    "status": workflow.get("status"),
+                    "created_at": workflow.get("created_at").isoformat() if workflow.get("created_at") else None
                 }
             except Exception as e:
                 logger.error(f"Failed to create code review workflow: {e}")
                 return {"error": f"Failed to create code review workflow: {str(e)}"}
-        
+                
+        @self.mcp.tool(name="execute_workflow")
         async def execute_workflow(workflow_id: str) -> Dict[str, Any]:
             """
             Execute a workflow.
@@ -876,38 +877,41 @@ class Orchestrator:
                     "error": f"Failed to execute workflow: {str(e)}",
                     "status": "failed"
                 }
-        
-        async def get_workflow_status(workflow_id: str) -> Dict[str, Any]:
-            """
-            Get the status of a workflow.
-            
-            Args:
-                workflow_id: ID of the workflow
                 
-            Returns:
-                Dict containing workflow status
-            """
+        @self.mcp.tool(name="get_workflow_status")
+        async def get_workflow_status(workflow_id):
             if workflow_id not in self.workflows:
-                return {"error": f"Workflow '{workflow_id}' not found"}
+                return {"error": f"Workflow not found: {workflow_id}"}
+            
+            # Get the workflow
+            workflow = self.workflows[workflow_id]
+            
+            # Get task statuses
+            dag = workflow["dag"]
+            task_statuses = {}
+            for task_id, task in dag.tasks.items():
+                # Convert datetime objects to ISO format strings if they exist
+                started_at = task.start_time.isoformat() if task.start_time else None
+                completed_at = task.end_time.isoformat() if task.end_time else None
                 
-            try:
-                # Get the workflow
-                workflow = self.workflows[workflow_id]
-                
-                # Get the workflow status
-                status = workflow.get_status()
-                
-                return {
-                    "workflow_id": workflow_id,
-                    **status
+                task_statuses[task_id] = {
+                    "status": task.status.value if hasattr(task.status, "value") else task.status,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "error": str(task.error) if task.error else None
                 }
-            except Exception as e:
-                logger.error(f"Failed to get status of workflow '{workflow_id}': {e}")
-                return {
-                    "workflow_id": workflow_id,
-                    "error": f"Failed to get workflow status: {str(e)}"
-                }
-        
+            
+            return {
+                "workflow_id": workflow_id,
+                "name": workflow["name"],
+                "status": workflow["status"],
+                "created_at": workflow["created_at"],
+                "started_at": workflow.get("started_at", None),
+                "completed_at": workflow.get("completed_at", None),
+                "tasks": task_statuses
+            }
+                
+        @self.mcp.tool(name="list_workflows")
         async def list_workflows() -> Dict[str, Any]:
             """
             List all workflows.
@@ -921,11 +925,11 @@ class Orchestrator:
                 for workflow_id, workflow in self.workflows.items():
                     workflows_info.append({
                         "workflow_id": workflow_id,
-                        "name": workflow.name,
-                        "description": workflow.description,
-                        "status": workflow.status,
-                        "created_at": workflow.created_at.isoformat(),
-                        "completed_at": workflow.completed_at.isoformat() if workflow.completed_at else None
+                        "name": workflow.get("name"),
+                        "description": workflow.get("description"),
+                        "status": workflow.get("status"),
+                        "created_at": workflow.get("created_at").isoformat() if workflow.get("created_at") else None,
+                        "completed_at": workflow.get("completed_at").isoformat() if workflow.get("completed_at") else None
                     })
                 
                 return {
@@ -935,40 +939,44 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Failed to list workflows: {e}")
                 return {"error": f"Failed to list workflows: {str(e)}"}
-        
-        async def visualize_workflow(workflow_id: str) -> Dict[str, Any]:
-            """
-            Generate a visualization of a workflow.
-            
-            Args:
-                workflow_id: ID of the workflow
                 
-            Returns:
-                Dict containing visualization data
-            """
+        @self.mcp.tool(name="visualize_workflow")
+        async def visualize_workflow(workflow_id):
             if workflow_id not in self.workflows:
-                return {"error": f"Workflow '{workflow_id}' not found"}
+                return {"error": f"Workflow not found: {workflow_id}"}
+            
+            # Get the workflow
+            workflow = self.workflows[workflow_id]
+            dag = workflow["dag"]
+            
+            # Create a visualization
+            visualization = []
+            visualization.append(f"Workflow: {workflow['name']} ({workflow_id})")
+            visualization.append(f"Status: {workflow['status']}")
+            visualization.append("Tasks:")
+            
+            for task_id, task in dag.tasks.items():
+                dependencies = ", ".join(task.dependencies) if hasattr(task, 'dependencies') and task.dependencies else "None"
+                status_value = task.status.value if hasattr(task.status, 'value') else str(task.status)
                 
-            try:
-                # Get the workflow
-                workflow = self.workflows[workflow_id]
+                visualization.append(f"  - {task_id} ({status_value}):")
+                visualization.append(f"    Tool: {task.tool_name}.{task.function_name}" if hasattr(task, 'tool_name') and hasattr(task, 'function_name') else f"    Function: {task.func.__name__ if hasattr(task.func, '__name__') else 'unknown'}")
+                visualization.append(f"    Dependencies: {dependencies}")
                 
-                # Generate visualization
-                visualization = workflow.visualize()
+                if hasattr(task, 'start_time') and task.start_time:
+                    visualization.append(f"    Started: {task.start_time.isoformat() if hasattr(task.start_time, 'isoformat') else str(task.start_time)}")
+                if hasattr(task, 'end_time') and task.end_time:
+                    visualization.append(f"    Completed: {task.end_time.isoformat() if hasattr(task.end_time, 'isoformat') else str(task.end_time)}")
+                if hasattr(task, 'error') and task.error:
+                    visualization.append(f"    Error: {str(task.error)}")
+            
+            return {
+                "workflow_id": workflow_id,
+                "name": workflow["name"],
+                "visualization": visualization
+            }
                 
-                return {
-                    "workflow_id": workflow_id,
-                    "name": workflow.name,
-                    "description": workflow.description,
-                    "visualization": visualization
-                }
-            except Exception as e:
-                logger.error(f"Failed to visualize workflow '{workflow_id}': {e}")
-                return {
-                    "workflow_id": workflow_id,
-                    "error": f"Failed to visualize workflow: {str(e)}"
-                }
-        
+        @self.mcp.tool(name="create_knowledge_reasoning_workflow")
         async def create_knowledge_reasoning_workflow(reasoning_request: str, workflow_id: Optional[str] = None) -> Dict[str, Any]:
             """
             Create a knowledge reasoning workflow.
@@ -1003,146 +1011,15 @@ class Orchestrator:
                 
                 return {
                     "workflow_id": workflow_id,
-                    "name": workflow.name,
-                    "description": workflow.description,
+                    "name": workflow.get("name"),
+                    "description": workflow.get("description"),
                     "reasoning_request": reasoning_request,
-                    "status": workflow.status,
-                    "created_at": workflow.created_at.isoformat()
+                    "status": workflow.get("status"),
+                    "created_at": workflow.get("created_at").isoformat() if workflow.get("created_at") else None
                 }
             except Exception as e:
                 logger.error(f"Failed to create knowledge reasoning workflow: {e}")
                 return {"error": f"Failed to create knowledge reasoning workflow: {str(e)}"}
-        
-        # Register functions with the MCP server
-        functions = [
-            {
-                "name": "create_feature_workflow",
-                "description": "Create a workflow for implementing a feature",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "feature_description": {
-                            "type": "string",
-                            "description": "Description of the feature to implement"
-                        },
-                        "workflow_id": {
-                            "type": "string",
-                            "description": "Optional ID for the workflow"
-                        }
-                    },
-                    "required": ["feature_description"]
-                },
-                "function": create_feature_workflow
-            },
-            {
-                "name": "create_knowledge_reasoning_workflow",
-                "description": "Create a workflow for knowledge-based reasoning",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "reasoning_request": {
-                            "type": "string",
-                            "description": "Description of the reasoning request or topic"
-                        },
-                        "workflow_id": {
-                            "type": "string",
-                            "description": "Optional ID for the workflow"
-                        }
-                    },
-                    "required": ["reasoning_request"]
-                },
-                "function": create_knowledge_reasoning_workflow
-            },
-            {
-                "name": "create_bugfix_workflow",
-                "description": "Create a workflow for fixing a bug",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "bug_description": {
-                            "type": "string",
-                            "description": "Description of the bug to fix"
-                        },
-                        "error_logs": {
-                            "type": "string",
-                            "description": "Optional error logs related to the bug"
-                        },
-                        "workflow_id": {
-                            "type": "string",
-                            "description": "Optional ID for the workflow"
-                        }
-                    },
-                    "required": ["bug_description"]
-                },
-                "function": create_bugfix_workflow
-            },
-            {
-                "name": "create_review_workflow",
-                "description": "Create a workflow for reviewing code",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "files_to_review": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            },
-                            "description": "List of files to review"
-                        },
-                        "review_context": {
-                            "type": "string",
-                            "description": "Optional context about the changes"
-                        },
-                        "workflow_id": {
-                            "type": "string",
-                            "description": "Optional ID for the workflow"
-                        }
-                    },
-                    "required": ["files_to_review"]
-                },
-                "function": create_review_workflow
-            },
-            {
-                "name": "execute_workflow",
-                "description": "Execute a workflow",
-                "parameters": {
-                    "type": "string",
-                    "description": "ID of the workflow to execute"
-                },
-                "function": execute_workflow
-            },
-            {
-                "name": "get_workflow_status",
-                "description": "Get the status of a workflow",
-                "parameters": {
-                    "type": "string",
-                    "description": "ID of the workflow"
-                },
-                "function": get_workflow_status
-            },
-            {
-                "name": "list_workflows",
-                "description": "List all workflows",
-                "parameters": {},
-                "function": list_workflows
-            },
-            {
-                "name": "visualize_workflow",
-                "description": "Generate a visualization of a workflow",
-                "parameters": {
-                    "type": "string",
-                    "description": "ID of the workflow"
-                },
-                "function": visualize_workflow
-            }
-        ]
-        
-        # Register workflow management tools
-        self.mcp.register_tools(
-            tool_name="workflow-manager",
-            tool_description="Tools for creating and managing workflow templates for common development tasks",
-            functions=functions
-        )
         
         logger.info("Registered workflow management tools")
     
@@ -1169,7 +1046,7 @@ class Orchestrator:
                     "name": name,
                     "description": description,
                     "status": "created",
-                    "created_at": datetime.now()
+                    "created_at": datetime.now().isoformat()
                 }
                 
                 logger.info(f"Created workflow {workflow_id}: {name}")
@@ -1236,7 +1113,7 @@ class Orchestrator:
                 
                 # Update workflow status
                 workflow["status"] = "running"
-                workflow["started_at"] = datetime.now()
+                workflow["started_at"] = datetime.now().isoformat()
                 
                 try:
                     # Execute the DAG
@@ -1244,7 +1121,7 @@ class Orchestrator:
                     
                     # Update workflow status
                     workflow["status"] = "completed"
-                    workflow["completed_at"] = datetime.now()
+                    workflow["completed_at"] = datetime.now().isoformat()
                     workflow["results"] = results
                     
                     return {
@@ -1283,10 +1160,14 @@ class Orchestrator:
             dag = workflow["dag"]
             task_statuses = {}
             for task_id, task in dag.tasks.items():
+                # Convert datetime objects to ISO format strings if they exist
+                started_at = task.start_time.isoformat() if task.start_time else None
+                completed_at = task.end_time.isoformat() if task.end_time else None
+                
                 task_statuses[task_id] = {
-                    "status": task.status,
-                    "started_at": task.started_at.isoformat() if task.started_at else None,
-                    "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                    "status": task.status.value if hasattr(task.status, "value") else task.status,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
                     "error": str(task.error) if task.error else None
                 }
             
@@ -1294,9 +1175,9 @@ class Orchestrator:
                 "workflow_id": workflow_id,
                 "name": workflow["name"],
                 "status": workflow["status"],
-                "created_at": workflow["created_at"].isoformat(),
-                "started_at": workflow.get("started_at", None).isoformat() if workflow.get("started_at") else None,
-                "completed_at": workflow.get("completed_at", None).isoformat() if workflow.get("completed_at") else None,
+                "created_at": workflow["created_at"],
+                "started_at": workflow.get("started_at", None),
+                "completed_at": workflow.get("completed_at", None),
                 "tasks": task_statuses
             }
         
@@ -1316,16 +1197,18 @@ class Orchestrator:
             visualization.append("Tasks:")
             
             for task_id, task in dag.tasks.items():
-                dependencies = ", ".join(task.dependencies) if task.dependencies else "None"
-                visualization.append(f"  - {task_id} ({task.status}):")
-                visualization.append(f"    Tool: {task.tool_name}.{task.function_name}")
+                dependencies = ", ".join(task.dependencies) if hasattr(task, 'dependencies') and task.dependencies else "None"
+                status_value = task.status.value if hasattr(task.status, 'value') else str(task.status)
+                
+                visualization.append(f"  - {task_id} ({status_value}):")
+                visualization.append(f"    Tool: {task.tool_name}.{task.function_name}" if hasattr(task, 'tool_name') and hasattr(task, 'function_name') else f"    Function: {task.func.__name__ if hasattr(task.func, '__name__') else 'unknown'}")
                 visualization.append(f"    Dependencies: {dependencies}")
                 
-                if task.started_at:
-                    visualization.append(f"    Started: {task.started_at.isoformat()}")
-                if task.completed_at:
-                    visualization.append(f"    Completed: {task.completed_at.isoformat()}")
-                if task.error:
+                if hasattr(task, 'start_time') and task.start_time:
+                    visualization.append(f"    Started: {task.start_time.isoformat() if hasattr(task.start_time, 'isoformat') else str(task.start_time)}")
+                if hasattr(task, 'end_time') and task.end_time:
+                    visualization.append(f"    Completed: {task.end_time.isoformat() if hasattr(task.end_time, 'isoformat') else str(task.end_time)}")
+                if hasattr(task, 'error') and task.error:
                     visualization.append(f"    Error: {str(task.error)}")
             
             return {

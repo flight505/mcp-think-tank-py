@@ -13,3 +13,5 @@ src/config.py
 src/orchestrator.py
 src/server.py
 tests/test_circuit_breaker.py
+tests/test_server.py
+tests/test_server_pytest.py

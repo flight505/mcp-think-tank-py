@@ -48,7 +48,7 @@ class MetricsCollector:
             enable_file_logging: Whether to log metrics to file
         """
         self.metrics: Dict[str, Dict[str, Any]] = {}
-        self.log_file_path = log_file_path or os.path.expanduser("~/.mcp-think-tank/metrics.jsonl")
+        self.log_file_path = log_file_path or os.path.expanduser("~/.mcp-think-tank-v2/metrics.jsonl")
         self.enable_file_logging = enable_file_logging
         self.flush_interval = flush_interval
         self.lock = threading.RLock()

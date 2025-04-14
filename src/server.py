@@ -17,7 +17,7 @@ from .orchestrator import Orchestrator
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    filename=os.path.expanduser("~/.mcp-think-tank/mcp-think-tank.log"),
+    filename=os.path.expanduser("~/.mcp-think-tank-v2/mcp-think-tank.log"),
     filemode="a",
 )
 logger = logging.getLogger("mcp-think-tank")
@@ -38,4 +38,4 @@ if __name__ == "__main__":
     os.makedirs(os.path.dirname(config.memory_file_path), exist_ok=True)
     
     # Run the server
-    mcp.run() 
+    mcp.run(transport='stdio') 

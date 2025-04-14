@@ -40,6 +40,9 @@ class Entity(BaseModel):
     
     model_config = {
         "populate_by_name": True,
+        "json_encoders": {
+            datetime: lambda dt: dt.isoformat() if dt else None
+        },
         "json_schema_extra": {
             "examples": [
                 {
@@ -63,7 +66,10 @@ class Relation(BaseModel):
     deleted: bool = False
     
     model_config = {
-        "populate_by_name": True
+        "populate_by_name": True,
+        "json_encoders": {
+            datetime: lambda dt: dt.isoformat() if dt else None
+        }
     }
 
 
@@ -327,7 +333,7 @@ class KnowledgeGraph:
         try:
             start_time = time.time()
             with open(self.memory_file_path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(record.model_dump()) + '\n')
+                f.write(record.model_dump_json() + '\n')
             self.last_operation_time = time.time() - start_time
             self.total_records += 1
         except Exception as e:
@@ -988,7 +994,7 @@ class KnowledgeGraph:
                             data=entity.model_dump(),
                             timestamp=entity.created_at
                         )
-                        f.write(json.dumps(record.model_dump()) + '\n')
+                        f.write(record.model_dump_json() + '\n')
                 
                 # Write all active relations
                 for relation in self.relations:
@@ -998,7 +1004,7 @@ class KnowledgeGraph:
                             data=relation.model_dump(),
                             timestamp=relation.created_at
                         )
-                        f.write(json.dumps(record.model_dump()) + '\n')
+                        f.write(record.model_dump_json() + '\n')
             
             # Backup the original file
             backup_file = f"{self.memory_file_path}.bak"
@@ -1123,7 +1129,7 @@ class MemoryTool:
         
         if use_basic:
             # Use basic configuration for simplified functionality
-            memory_file_path = os.path.expanduser("~/.mcp-think-tank/memory.jsonl")
+            memory_file_path = os.path.expanduser("~/.mcp-think-tank-v2/memory.jsonl")
             self.knowledge_graph = KnowledgeGraph(
                 memory_file_path=memory_file_path,
                 use_embeddings=False,

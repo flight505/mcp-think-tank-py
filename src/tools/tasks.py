@@ -33,7 +33,7 @@ logger = logging.getLogger("mcp-think-tank.tasks")
 
 # Model configuration
 LOCAL_MODEL_ID = "google/gemma-3-1b-instruct"
-LOCAL_MODEL_PATH = os.path.expanduser("~/.mcp-think-tank/models/gemma-3-1b")
+LOCAL_MODEL_PATH = os.path.expanduser("~/.mcp-think-tank-v2/models/gemma-3-1b")
 
 class TaskStatus(str, Enum):
     """Enum for task status"""
