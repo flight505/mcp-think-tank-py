@@ -590,17 +590,26 @@ class Orchestrator:
             }
     
     def _register_memory_tools(self) -> None:
-        """Register memory-related tools with the MCP server."""
+        """Register memory tools with the MCP server."""
         # FastMCP 2.1.0 no longer supports register_tools method
         # Instead, we need to use decorators to register tools
         
         @self.mcp.tool(name="create_entities")
         async def create_entities(entities):
-            return await self.memory_tool.create_entities(entities)
-        
+            """Create multiple new entities in the knowledge graph"""
+            # Ensure entities parameter is provided and is a list
+            if not entities or not isinstance(entities, list):
+                raise ValueError("entities must be a non-empty list of entity objects")
+                
+            return await self._execute_with_timeout_and_recovery(
+                func=self.memory_tool.create_entities,
+                task_id="create_entities",
+                entities=entities
+            )
+            
         @self.mcp.tool(name="create_relations")
         async def create_relations(relations):
-            return await self.memory_tool.create_relations(relations)
+            return await self.memory_tool.create_relations(relations=relations)
         
         @self.mcp.tool(name="add_observations")
         async def add_observations(observations):
@@ -650,12 +659,19 @@ class Orchestrator:
             Use it when complex reasoning or some cache memory is needed. For best results, structure your reasoning with: 
             1) Problem definition, 2) Relevant facts/context, 3) Analysis steps, 4) Conclusion/decision.
             """
-            return await self.think_tool.think(
-                structuredReasoning=structuredReasoning,
+            # Ensure structuredReasoning is a string and not empty
+            if not structuredReasoning or not isinstance(structuredReasoning, str):
+                raise ValueError("structuredReasoning must be a non-empty string")
+                
+            return await self._execute_with_timeout_and_recovery(
+                func=self.think_tool.process,
+                task_id="think",
+                structured_reasoning=structuredReasoning,
+                store_in_memory=storeInMemory,
+                reflexion=False,
                 category=category,
                 tags=tags,
-                associateWithEntity=associateWithEntity,
-                storeInMemory=storeInMemory
+                associate_with_entity=associateWithEntity
             )
     
     def _register_tasks_tools(self) -> None:

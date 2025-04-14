@@ -10,8 +10,8 @@ from typing import Dict, List
 from fastmcp import FastMCP
 
 # Import local modules
-from .config import get_config
-from .orchestrator import Orchestrator
+from src.config import get_config
+from src.orchestrator import Orchestrator
 
 # Configure logging
 logging.basicConfig(
